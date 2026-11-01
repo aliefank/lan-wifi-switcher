@@ -1,0 +1,91 @@
+name: Release win-x64
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Resolve tag
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: ${TAG}"
+
+      - name: Publish self-contained win-x64
+        run: >
+          dotnet publish src/LanWifiSwitcher/LanWifiSwitcher.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -o ./publish
+
+      - name: Stage release asset
+        shell: bash
+        run: |
+          test -f ./publish/LanWifiSwitcher.exe
+          cp ./publish/LanWifiSwitcher.exe ./LanWifiSwitcher-win-x64.exe
+          ls -lh ./LanWifiSwitcher-win-x64.exe
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          # Ensure the tag exists on the default branch tip when dispatched manually
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+              git config user.name "github-actions[bot]"
+              git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+              git tag -a "${TAG}" -m "${TAG}"
+              git push origin "${TAG}"
+            fi
+          fi
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists; uploading asset (clobber)."
+            gh release upload "${TAG}" ./LanWifiSwitcher-win-x64.exe --clobber
+          else
+            gh release create "${TAG}" \
+              ./LanWifiSwitcher-win-x64.exe \
+              --title "${TAG}" \
+              --notes "Self-contained Windows x64 build of LAN Wi‑Fi Switcher (${TAG}).
+
+Download **LanWifiSwitcher-win-x64.exe**, run it, and accept the UAC prompt. The app lives in the system tray.
+
+Built with:
+\`\`\`
+dotnet publish src/LanWifiSwitcher/LanWifiSwitcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+\`\`\`"
+          fi
