@@ -9,6 +9,7 @@ public sealed class SettingsForm : Form
     private readonly CheckBox _toastCheck;
     private readonly CheckBox _startupCheck;
     private readonly Label _statusLabel;
+    private readonly Label _hintLabel;
 
     public SettingsForm(AppConfig config, NetworkAdapterService network)
     {
@@ -21,7 +22,7 @@ public sealed class SettingsForm : Form
         MinimizeBox = false;
         ShowInTaskbar = true;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(460, 300);
+        ClientSize = new Size(560, 340);
         Font = new Font("Segoe UI", 9f);
 
         var ethernetLabel = new Label
@@ -35,12 +36,12 @@ public sealed class SettingsForm : Form
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
             Location = new Point(16, 40),
-            Width = 428
+            Width = 528
         };
 
         var wifiLabel = new Label
         {
-            Text = "Wi‑Fi adapter:",
+            Text = "Wi‑Fi adapter (all NICs listed — prefer [Wi‑Fi] / Realtek 8922AE / MediaTek):",
             Location = new Point(16, 78),
             AutoSize = true
         };
@@ -49,13 +50,21 @@ public sealed class SettingsForm : Form
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
             Location = new Point(16, 100),
-            Width = 428
+            Width = 528
+        };
+
+        _hintLabel = new Label
+        {
+            Location = new Point(16, 132),
+            Size = new Size(528, 20),
+            ForeColor = Color.FromArgb(70, 70, 70),
+            Text = "Each entry shows [type, status] and chipset description."
         };
 
         _toastCheck = new CheckBox
         {
             Text = "Show a notification when switching",
-            Location = new Point(16, 148),
+            Location = new Point(16, 164),
             AutoSize = true,
             Checked = _config.ShowToastOnSwitch
         };
@@ -63,15 +72,15 @@ public sealed class SettingsForm : Form
         _startupCheck = new CheckBox
         {
             Text = "Run at Windows startup",
-            Location = new Point(16, 176),
+            Location = new Point(16, 192),
             AutoSize = true,
             Checked = _config.RunAtStartup || StartupManager.IsEnabled()
         };
 
         _statusLabel = new Label
         {
-            Location = new Point(16, 210),
-            Size = new Size(428, 36),
+            Location = new Point(16, 228),
+            Size = new Size(528, 40),
             ForeColor = Color.FromArgb(70, 70, 70)
         };
 
@@ -79,7 +88,7 @@ public sealed class SettingsForm : Form
         {
             Text = "Save",
             DialogResult = DialogResult.None,
-            Location = new Point(268, 256),
+            Location = new Point(368, 288),
             Size = new Size(88, 28)
         };
         saveButton.Click += (_, _) => SaveAndClose();
@@ -88,22 +97,26 @@ public sealed class SettingsForm : Form
         {
             Text = "Cancel",
             DialogResult = DialogResult.Cancel,
-            Location = new Point(360, 256),
+            Location = new Point(460, 288),
             Size = new Size(88, 28)
         };
 
         var refreshButton = new Button
         {
             Text = "Refresh list",
-            Location = new Point(16, 256),
+            Location = new Point(16, 288),
             Size = new Size(100, 28)
         };
-        refreshButton.Click += (_, _) => LoadAdapters();
+        refreshButton.Click += (_, _) =>
+        {
+            LoadAdapters();
+            UpdateStatus();
+        };
 
         Controls.AddRange(
         [
             ethernetLabel, _ethernetCombo,
-            wifiLabel, _wifiCombo,
+            wifiLabel, _wifiCombo, _hintLabel,
             _toastCheck, _startupCheck, _statusLabel,
             refreshButton, saveButton, cancelButton
         ]);
@@ -120,23 +133,23 @@ public sealed class SettingsForm : Form
 
     private void LoadAdapters()
     {
+        // Always bind the full adapter list with type hints — do not hide "Other".
         var adapters = _network.GetAdapters();
-        var ethernet = adapters.Where(a => a.Kind is AdapterKind.Ethernet or AdapterKind.Other).ToList();
-        var wifi = adapters.Where(a => a.Kind is AdapterKind.Wireless or AdapterKind.Other).ToList();
+        BindCombo(_ethernetCombo, adapters, _config.EthernetAdapterId, _config.EthernetAdapterName, AdapterKind.Ethernet);
+        BindCombo(_wifiCombo, adapters, _config.WifiAdapterId, _config.WifiAdapterName, AdapterKind.Wireless);
 
-        // Always allow picking from the full list in case classification missed something.
-        if (ethernet.Count == 0) ethernet = adapters.ToList();
-        if (wifi.Count == 0) wifi = adapters.ToList();
-
-        BindCombo(_ethernetCombo, ethernet, _config.EthernetAdapterId, _config.EthernetAdapterName);
-        BindCombo(_wifiCombo, wifi, _config.WifiAdapterId, _config.WifiAdapterName);
+        var wifi = adapters.Count(a => a.Kind == AdapterKind.Wireless);
+        _hintLabel.Text = wifi == 0
+            ? "No NIC classified as Wi‑Fi yet — pick manually (Realtek 8922AE / WLAN / Wireless still appear below)."
+            : $"Detected {wifi} Wi‑Fi adapter(s). Entries show [type, status] and description.";
     }
 
     private static void BindCombo(
         ComboBox combo,
         IReadOnlyList<NetworkAdapterInfo> adapters,
         string? selectedId,
-        string? selectedName)
+        string? selectedName,
+        AdapterKind preferredKind)
     {
         combo.BeginUpdate();
         combo.Items.Clear();
@@ -152,6 +165,8 @@ public sealed class SettingsForm : Form
                 string.Equals(a.DeviceId, selectedId, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(a.Name, selectedName, StringComparison.OrdinalIgnoreCase));
         }
+
+        match ??= adapters.FirstOrDefault(a => a.Kind == preferredKind);
 
         if (match is not null)
         {
@@ -191,7 +206,8 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        if (string.Equals(ethernet.Name, wifi.Name, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(ethernet.DeviceId, wifi.DeviceId, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(ethernet.Name, wifi.Name, StringComparison.OrdinalIgnoreCase))
         {
             MessageBox.Show(
                 "Ethernet and Wi‑Fi must be different adapters.",

@@ -26,7 +26,35 @@ public sealed class NetworkAdapterInfo
     public bool IsEnabled { get; init; }
     public bool IsConnected { get; init; }
     public uint? InterfaceIndex { get; init; }
+    public string? PnpDeviceId { get; init; }
 
-    public override string ToString() =>
-        $"{Name}{(IsEnabled ? "" : " [disabled]")}";
+    /// <summary>Short type label for picker UIs (e.g. "Wi‑Fi", "Ethernet", "Other").</summary>
+    public string KindLabel => Kind switch
+    {
+        AdapterKind.Ethernet => "Ethernet",
+        AdapterKind.Wireless => "Wi‑Fi",
+        AdapterKind.Other => "Other",
+        _ => "Unknown"
+    };
+
+    /// <summary>List/combo display: name, type hint, and optional description chipset clue.</summary>
+    public string DisplayText
+    {
+        get
+        {
+            var status = IsEnabled ? (IsConnected ? "up" : "enabled") : "disabled";
+            var desc = string.IsNullOrWhiteSpace(Description) ||
+                       string.Equals(Description, Name, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : Truncate(Description!, 48);
+            return desc is null
+                ? $"{Name}  [{KindLabel}, {status}]"
+                : $"{Name}  [{KindLabel}, {status}] — {desc}";
+        }
+    }
+
+    public override string ToString() => DisplayText;
+
+    private static string Truncate(string value, int max) =>
+        value.Length <= max ? value : value[..(max - 1)] + "…";
 }
