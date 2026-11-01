@@ -73,6 +73,20 @@ jobs:
             fi
           fi
 
+          cat > release-notes.md <<EOF
+          Self-contained Windows x64 build of LAN Wi-Fi Switcher (${TAG}).
+
+          Download **LanWifiSwitcher-win-x64.exe**, run it, and accept the UAC prompt. The app lives in the system tray.
+
+          Built with:
+
+          \`\`\`
+          dotnet publish src/LanWifiSwitcher/LanWifiSwitcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+          \`\`\`
+          EOF
+          # Strip the common leading indent from the heredoc body
+          sed -i 's/^          //' release-notes.md
+
           if gh release view "${TAG}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists; uploading asset (clobber)."
             gh release upload "${TAG}" ./LanWifiSwitcher-win-x64.exe --clobber
@@ -80,12 +94,5 @@ jobs:
             gh release create "${TAG}" \
               ./LanWifiSwitcher-win-x64.exe \
               --title "${TAG}" \
-              --notes "Self-contained Windows x64 build of LAN Wi‑Fi Switcher (${TAG}).
-
-Download **LanWifiSwitcher-win-x64.exe**, run it, and accept the UAC prompt. The app lives in the system tray.
-
-Built with:
-\`\`\`
-dotnet publish src/LanWifiSwitcher/LanWifiSwitcher.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
-\`\`\`"
+              --notes-file release-notes.md
           fi
