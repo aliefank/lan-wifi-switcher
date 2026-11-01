@@ -130,8 +130,9 @@ src/LanWifiSwitcher/
 ## Notes
 
 - Only one instance runs at a time.
-- Virtual/VPN/Bluetooth adapters are classified as “Other” and are still selectable if auto-detect misses your NIC.
-- If a toggle fails, confirm the app is elevated and that the selected names match **Control Panel → Network Connections** (`ncpa.cpl`).
+- Adapter classification uses `.NET` interface type, WMI `AdapterTypeId`, and Wi‑Fi chipset signals (Realtek 8922AE / RTL88xx, MediaTek MT79xx, Intel AX/BE, “Wi‑Fi 6/7”, WLAN, Wireless). Bare vendor names like “Realtek” alone are **not** treated as Ethernet.
+- Settings / Choose adapters list **every** NIC with `[Ethernet|Wi‑Fi|Other]` hints so oddly named adapters stay selectable.
+- If a toggle fails, a tray error toast and dialog explain why; confirm the app is elevated and that the selected names match **Control Panel → Network Connections** (`ncpa.cpl`).
 
 ## License
 

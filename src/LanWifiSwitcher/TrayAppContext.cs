@@ -108,11 +108,7 @@ public sealed class TrayAppContext : ApplicationContext
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
-                ex.Message,
-                "LAN Wi‑Fi Switcher",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+            ShowToggleError(ex);
             RefreshTrayPresentation();
         }
         finally
@@ -178,6 +174,27 @@ public sealed class TrayAppContext : ApplicationContext
         base.Dispose(disposing);
     }
 
+    private void ShowToggleError(Exception ex)
+    {
+        var message = string.IsNullOrWhiteSpace(ex.Message)
+            ? "Toggle failed for an unknown reason."
+            : ex.Message;
+
+        // Balloon toast for immediate visibility from the tray…
+        _tray.BalloonTipTitle = "LAN Wi‑Fi Switcher — toggle failed";
+        _tray.BalloonTipText = TruncateBalloon(message);
+        _tray.BalloonTipIcon = ToolTipIcon.Error;
+        _tray.ShowBalloonTip(6000);
+
+        // …and a dialog with the full detail + recovery hint.
+        MessageBox.Show(
+            message + "\n\nTip: Right-click the tray icon → Choose adapters… and select your " +
+            "Realtek / MediaTek / WLAN NIC (look for the [Wi‑Fi] hint).",
+            "LAN Wi‑Fi Switcher — toggle failed",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Error);
+    }
+
     private static string ModeLabel(ConnectionMode mode) => mode switch
     {
         ConnectionMode.Lan => "LAN",
@@ -191,6 +208,18 @@ public sealed class TrayAppContext : ApplicationContext
     {
         // NotifyIcon.Text max length is 63 characters on Windows.
         const int max = 63;
+        if (text.Length <= max)
+        {
+            return text;
+        }
+
+        return text[..(max - 1)] + "…";
+    }
+
+    private static string TruncateBalloon(string text)
+    {
+        // Balloon tip body is larger than tooltip text; keep it readable.
+        const int max = 250;
         if (text.Length <= max)
         {
             return text;
