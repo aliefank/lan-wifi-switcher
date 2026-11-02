@@ -130,9 +130,11 @@ src/LanWifiSwitcher/
 ## Notes
 
 - Only one instance runs at a time.
-- Adapter classification uses `.NET` interface type, WMI `AdapterTypeId`, and Wi‑Fi chipset signals (Realtek 8922AE / RTL88xx, MediaTek MT79xx, Intel AX/BE, “Wi‑Fi 6/7”, WLAN, Wireless). Bare vendor names like “Realtek” alone are **not** treated as Ethernet.
-- Settings / Choose adapters list **every** NIC with `[Ethernet|Wi‑Fi|Other]` hints so oddly named adapters stay selectable.
-- If a toggle fails, a tray error toast and dialog explain why; confirm the app is elevated and that the selected names match **Control Panel → Network Connections** (`ncpa.cpl`).
+- Auto-detect prefers ncpa.cpl aliases **`Ethernet`** and **`Wi‑Fi`**, and ignores Bluetooth / TAP-Windows / OpenVPN / other virtual NICs.
+- Toggle flips admin enable/disable only — an **unplugged Ethernet cable is fine**; link state is not required.
+- Adapter classification uses `.NET` interface type, WMI `AdapterTypeId`, and Wi‑Fi chipset signals (Realtek 8922AE / RTL88xx, MediaTek, “Wi‑Fi 6/7”). Virtual adapters are classified before Ethernet NIC-type heuristics.
+- Settings / Choose adapters use a modern dark panel UI and list every NIC with type/status hints.
+- If a toggle fails, a tray error toast and dialog explain why; confirm elevation and that names match `ncpa.cpl`.
 
 ## License
 

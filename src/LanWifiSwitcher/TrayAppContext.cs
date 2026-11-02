@@ -16,7 +16,8 @@ public sealed class TrayAppContext : ApplicationContext
     public TrayAppContext()
     {
         _config = AppConfig.Load();
-        _network.AutoSelectDefaults(_config);
+        // Repair stale TAP/VPN/Bluetooth picks; prefer ncpa.cpl "Ethernet" + "Wi-Fi".
+        _network.AutoSelectDefaults(_config, repairUnsuitable: true);
         _config.RunAtStartup = StartupManager.IsEnabled() || _config.RunAtStartup;
         StartupManager.SyncFromConfig(_config);
         _config.Save();
