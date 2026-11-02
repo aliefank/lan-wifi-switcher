@@ -4,8 +4,8 @@ public sealed class SettingsForm : Form
 {
     private readonly AppConfig _config;
     private readonly NetworkAdapterService _network;
-    private readonly ComboBox _ethernetCombo;
-    private readonly ComboBox _wifiCombo;
+    private readonly ListBox _ethernetList;
+    private readonly ListBox _wifiList;
     private readonly CheckBox _toastCheck;
     private readonly CheckBox _startupCheck;
     private readonly Label _statusLabel;
@@ -22,107 +22,108 @@ public sealed class SettingsForm : Form
         MinimizeBox = false;
         ShowInTaskbar = true;
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(560, 340);
-        Font = new Font("Segoe UI", 9f);
+        ClientSize = new Size(640, 560);
+        UiTheme.ApplyWindow(this);
 
-        var ethernetLabel = new Label
+        var title = new Label
         {
-            Text = "Ethernet / LAN adapter:",
-            Location = new Point(16, 18),
-            AutoSize = true
+            Text = "Settings",
+            Location = new Point(24, 18),
+            AutoSize = true,
+            Font = UiTheme.TitleFont,
+            ForeColor = UiTheme.TextPrimary
         };
 
-        _ethernetCombo = new ComboBox
-        {
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            Location = new Point(16, 40),
-            Width = 528
-        };
+        var subtitle = UiTheme.MakeMutedLabel(
+            "Tray-only switcher · adapters use ncpa.cpl names · cable not required to toggle",
+            new Point(24, 50),
+            new Size(592, 22));
 
-        var wifiLabel = new Label
+        var etherCard = UiTheme.MakeCard(new Point(24, 84), new Size(592, 160));
+        var etherTitle = new Label
         {
-            Text = "Wi‑Fi adapter (all NICs listed — prefer [Wi‑Fi] / Realtek 8922AE / MediaTek):",
-            Location = new Point(16, 78),
-            AutoSize = true
+            Text = "LAN · Ethernet",
+            Location = new Point(14, 10),
+            AutoSize = true,
+            Font = UiTheme.SectionFont,
+            ForeColor = UiTheme.AccentLan,
+            BackColor = Color.Transparent
         };
+        _ethernetList = new ListBox
+        {
+            Location = new Point(14, 36),
+            Size = new Size(564, 110)
+        };
+        UiTheme.StyleOwnerDrawList(_ethernetList);
+        etherCard.Controls.AddRange([etherTitle, _ethernetList]);
 
-        _wifiCombo = new ComboBox
+        var wifiCard = UiTheme.MakeCard(new Point(24, 256), new Size(592, 160));
+        var wifiTitle = new Label
         {
-            DropDownStyle = ComboBoxStyle.DropDownList,
-            Location = new Point(16, 100),
-            Width = 528
+            Text = "Wi‑Fi",
+            Location = new Point(14, 10),
+            AutoSize = true,
+            Font = UiTheme.SectionFont,
+            ForeColor = UiTheme.AccentWifi,
+            BackColor = Color.Transparent
         };
+        _wifiList = new ListBox
+        {
+            Location = new Point(14, 36),
+            Size = new Size(564, 110)
+        };
+        UiTheme.StyleOwnerDrawList(_wifiList);
+        wifiCard.Controls.AddRange([wifiTitle, _wifiList]);
 
-        _hintLabel = new Label
-        {
-            Location = new Point(16, 132),
-            Size = new Size(528, 20),
-            ForeColor = Color.FromArgb(70, 70, 70),
-            Text = "Each entry shows [type, status] and chipset description."
-        };
+        _hintLabel = UiTheme.MakeMutedLabel("", new Point(24, 424), new Size(592, 20));
 
         _toastCheck = new CheckBox
         {
             Text = "Show a notification when switching",
-            Location = new Point(16, 164),
+            Location = new Point(24, 450),
             AutoSize = true,
-            Checked = _config.ShowToastOnSwitch
+            Checked = _config.ShowToastOnSwitch,
+            ForeColor = UiTheme.TextPrimary,
+            BackColor = Color.Transparent,
+            FlatStyle = FlatStyle.Flat
         };
 
         _startupCheck = new CheckBox
         {
             Text = "Run at Windows startup",
-            Location = new Point(16, 192),
+            Location = new Point(24, 476),
             AutoSize = true,
-            Checked = _config.RunAtStartup || StartupManager.IsEnabled()
+            Checked = _config.RunAtStartup || StartupManager.IsEnabled(),
+            ForeColor = UiTheme.TextPrimary,
+            BackColor = Color.Transparent,
+            FlatStyle = FlatStyle.Flat
         };
 
-        _statusLabel = new Label
-        {
-            Location = new Point(16, 228),
-            Size = new Size(528, 40),
-            ForeColor = Color.FromArgb(70, 70, 70)
-        };
+        _statusLabel = UiTheme.MakeMutedLabel("", new Point(280, 450), new Size(336, 44));
+        _statusLabel.Font = UiTheme.SmallFont;
 
-        var saveButton = new Button
-        {
-            Text = "Save",
-            DialogResult = DialogResult.None,
-            Location = new Point(368, 288),
-            Size = new Size(88, 28)
-        };
-        saveButton.Click += (_, _) => SaveAndClose();
-
-        var cancelButton = new Button
-        {
-            Text = "Cancel",
-            DialogResult = DialogResult.Cancel,
-            Location = new Point(460, 288),
-            Size = new Size(88, 28)
-        };
-
-        var refreshButton = new Button
-        {
-            Text = "Refresh list",
-            Location = new Point(16, 288),
-            Size = new Size(100, 28)
-        };
-        refreshButton.Click += (_, _) =>
+        var refresh = UiTheme.MakeGhostButton("Refresh", new Point(24, 516), new Size(90, 30));
+        refresh.Click += (_, _) =>
         {
             LoadAdapters();
             UpdateStatus();
         };
 
+        var cancel = UiTheme.MakeGhostButton("Cancel", new Point(436, 516), new Size(88, 30));
+        cancel.DialogResult = DialogResult.Cancel;
+
+        var save = UiTheme.MakePrimaryButton("Save", new Point(532, 516), new Size(84, 30));
+        save.Click += (_, _) => SaveAndClose();
+
         Controls.AddRange(
         [
-            ethernetLabel, _ethernetCombo,
-            wifiLabel, _wifiCombo, _hintLabel,
+            title, subtitle, etherCard, wifiCard, _hintLabel,
             _toastCheck, _startupCheck, _statusLabel,
-            refreshButton, saveButton, cancelButton
+            refresh, cancel, save
         ]);
 
-        AcceptButton = saveButton;
-        CancelButton = cancelButton;
+        AcceptButton = save;
+        CancelButton = cancel;
 
         Load += (_, _) =>
         {
@@ -133,51 +134,69 @@ public sealed class SettingsForm : Form
 
     private void LoadAdapters()
     {
-        // Always bind the full adapter list with type hints — do not hide "Other".
         var adapters = _network.GetAdapters();
-        BindCombo(_ethernetCombo, adapters, _config.EthernetAdapterId, _config.EthernetAdapterName, AdapterKind.Ethernet);
-        BindCombo(_wifiCombo, adapters, _config.WifiAdapterId, _config.WifiAdapterName, AdapterKind.Wireless);
+        BindList(_ethernetList, adapters, _config.EthernetAdapterId, _config.EthernetAdapterName, AdapterKind.Ethernet);
+        BindList(_wifiList, adapters, _config.WifiAdapterId, _config.WifiAdapterName, AdapterKind.Wireless);
 
-        var wifi = adapters.Count(a => a.Kind == AdapterKind.Wireless);
+        var wifi = adapters.Count(a => a.Kind == AdapterKind.Wireless && !a.IsVirtualOrIgnored);
+        var ignored = adapters.Count(a => a.IsVirtualOrIgnored);
         _hintLabel.Text = wifi == 0
-            ? "No NIC classified as Wi‑Fi yet — pick manually (Realtek 8922AE / WLAN / Wireless still appear below)."
-            : $"Detected {wifi} Wi‑Fi adapter(s). Entries show [type, status] and description.";
+            ? "No Wi‑Fi classified yet — pick the Wi‑Fi row manually (Realtek 8922AE)."
+            : $"{wifi} Wi‑Fi · {ignored} ignored virtual (Bluetooth / TAP / OpenVPN).";
     }
 
-    private static void BindCombo(
-        ComboBox combo,
+    private static void BindList(
+        ListBox list,
         IReadOnlyList<NetworkAdapterInfo> adapters,
         string? selectedId,
         string? selectedName,
         AdapterKind preferredKind)
     {
-        combo.BeginUpdate();
-        combo.Items.Clear();
+        list.BeginUpdate();
+        list.Items.Clear();
         foreach (var adapter in adapters)
         {
-            combo.Items.Add(adapter);
+            list.Items.Add(adapter);
         }
 
-        NetworkAdapterInfo? match = null;
-        if (!string.IsNullOrWhiteSpace(selectedId) || !string.IsNullOrWhiteSpace(selectedName))
+        var matchIndex = -1;
+        for (var i = 0; i < adapters.Count; i++)
         {
-            match = adapters.FirstOrDefault(a =>
-                string.Equals(a.DeviceId, selectedId, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(a.Name, selectedName, StringComparison.OrdinalIgnoreCase));
+            var a = adapters[i];
+            if (string.Equals(a.Name, selectedName, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(a.DeviceId, selectedId, StringComparison.OrdinalIgnoreCase))
+            {
+                matchIndex = i;
+                break;
+            }
         }
 
-        match ??= adapters.FirstOrDefault(a => a.Kind == preferredKind);
-
-        if (match is not null)
+        if (matchIndex < 0)
         {
-            combo.SelectedItem = match;
-        }
-        else if (combo.Items.Count > 0)
-        {
-            combo.SelectedIndex = 0;
+            var bestScore = -1;
+            for (var i = 0; i < adapters.Count; i++)
+            {
+                var a = adapters[i];
+                if (a.Kind != preferredKind || a.IsVirtualOrIgnored) continue;
+                var score = NetworkAdapterService.AliasScore(a.Name, preferredKind == AdapterKind.Wireless);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    matchIndex = i;
+                }
+            }
         }
 
-        combo.EndUpdate();
+        if (matchIndex >= 0)
+        {
+            list.SelectedIndex = matchIndex;
+        }
+        else if (list.Items.Count > 0)
+        {
+            list.SelectedIndex = 0;
+        }
+
+        list.EndUpdate();
     }
 
     private void UpdateStatus()
@@ -185,18 +204,18 @@ public sealed class SettingsForm : Form
         var mode = _network.DetectCurrentMode(_config);
         _statusLabel.Text = mode switch
         {
-            ConnectionMode.Lan => "Current mode: LAN (Ethernet enabled, Wi‑Fi disabled)",
-            ConnectionMode.Wifi => "Current mode: Wi‑Fi (Ethernet disabled, Wi‑Fi enabled)",
-            ConnectionMode.Both => "Current mode: both adapters enabled",
-            ConnectionMode.Neither => "Current mode: both adapters disabled",
-            _ => "Current mode: unknown — pick both adapters and toggle."
+            ConnectionMode.Lan => "Mode: LAN (Ethernet enabled — cable optional)",
+            ConnectionMode.Wifi => "Mode: Wi‑Fi (Ethernet disabled)",
+            ConnectionMode.Both => "Mode: both enabled",
+            ConnectionMode.Neither => "Mode: both disabled",
+            _ => "Mode: unknown — save adapters, then toggle from the tray."
         };
     }
 
     private void SaveAndClose()
     {
-        if (_ethernetCombo.SelectedItem is not NetworkAdapterInfo ethernet ||
-            _wifiCombo.SelectedItem is not NetworkAdapterInfo wifi)
+        if (_ethernetList.SelectedItem is not NetworkAdapterInfo ethernet ||
+            _wifiList.SelectedItem is not NetworkAdapterInfo wifi)
         {
             MessageBox.Show(
                 "Select both an Ethernet and a Wi‑Fi adapter.",
@@ -206,8 +225,7 @@ public sealed class SettingsForm : Form
             return;
         }
 
-        if (string.Equals(ethernet.DeviceId, wifi.DeviceId, StringComparison.OrdinalIgnoreCase) ||
-            string.Equals(ethernet.Name, wifi.Name, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(ethernet.Name, wifi.Name, StringComparison.OrdinalIgnoreCase))
         {
             MessageBox.Show(
                 "Ethernet and Wi‑Fi must be different adapters.",
