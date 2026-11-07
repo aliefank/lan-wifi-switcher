@@ -184,16 +184,45 @@ public sealed class AdapterChooserForm : Form
 
     private void AutoDetect()
     {
+        // Refresh the on-screen list first so WMI + NetworkInterface merge is current.
+        Populate();
+
         var temp = new AppConfig();
         _network.AutoSelectDefaults(temp, repairUnsuitable: true);
+
+        // If service still missed one role, pick exact aliases directly from the list items.
+        var listed = _ethernetList.Items.Cast<NetworkAdapterInfo>().ToList();
+        temp.EthernetAdapterName ??= listed
+            .Where(a => NetworkAdapterService.AliasScore(a.Name, wifi: false) >= 90)
+            .OrderByDescending(a => NetworkAdapterService.AliasScore(a.Name, wifi: false))
+            .Select(a => a.Name)
+            .FirstOrDefault();
+        temp.EthernetAdapterId ??= listed
+            .FirstOrDefault(a => NetworkAdapterService.NamesEqual(a.Name, temp.EthernetAdapterName))
+            ?.DeviceId;
+        temp.WifiAdapterName ??= listed
+            .Where(a => NetworkAdapterService.AliasScore(a.Name, wifi: true) >= 90)
+            .OrderByDescending(a => NetworkAdapterService.AliasScore(a.Name, wifi: true))
+            .Select(a => a.Name)
+            .FirstOrDefault();
+        temp.WifiAdapterId ??= listed
+            .FirstOrDefault(a => NetworkAdapterService.NamesEqual(a.Name, temp.WifiAdapterName))
+            ?.DeviceId;
+
         SelectMatching(_ethernetList, temp.EthernetAdapterId, temp.EthernetAdapterName, AdapterKind.Ethernet);
         SelectMatching(_wifiList, temp.WifiAdapterId, temp.WifiAdapterName, AdapterKind.Wireless);
 
         if (string.IsNullOrWhiteSpace(temp.WifiAdapterName) || string.IsNullOrWhiteSpace(temp.EthernetAdapterName))
         {
+            var missing = new List<string>();
+            if (string.IsNullOrWhiteSpace(temp.EthernetAdapterName)) missing.Add("Ethernet");
+            if (string.IsNullOrWhiteSpace(temp.WifiAdapterName)) missing.Add("Wi-Fi");
+
             MessageBox.Show(
-                "Could not auto-detect both adapters. Pick \"Ethernet\" and \"Wi‑Fi\" manually from the lists " +
-                "(skip Bluetooth / TAP / OpenVPN).",
+                $"Could not auto-detect: {string.Join(" + ", missing)}.\n\n" +
+                "Looked for ncpa.cpl aliases \"Ethernet\" and \"Wi-Fi\" " +
+                "(and Realtek 2.5GbE / 8922AE descriptions). Skip Bluetooth / TAP / OpenVPN.\n\n" +
+                "Adapters seen:\n" + _network.FormatAdapterDiagnostics(listed),
                 Text,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
