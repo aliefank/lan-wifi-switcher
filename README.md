@@ -132,7 +132,7 @@ src/LanWifiSwitcher/
 - Only one instance runs at a time.
 - Auto-detect prefers ncpa.cpl aliases **`Ethernet`** and **`Wi‑Fi`**, and ignores Bluetooth / TAP-Windows / OpenVPN / other virtual NICs.
 - Toggle flips admin enable/disable only — an **unplugged Ethernet cable is fine**; link state is not required.
-- Adapter resolve matches by **normalized** connection alias first (Unicode hyphen / NBSP safe), then DeviceID; if the saved config misses, it re-resolves by `"Wi-Fi"` / `"Ethernet"` and Realtek 8922AE-style description hints.
+- Adapter resolve matches by **normalized** connection alias first (Unicode hyphen / NBSP / ZWSP safe), then DeviceID; Auto-detect prefers exact `"Wi-Fi"` / `"Ethernet"` aliases (merged from WMI + NetworkInterface) and Realtek 8922AE / 2.5GbE description hints.
 - Adapter classification uses `.NET` interface type, WMI `AdapterTypeId`, and Wi‑Fi chipset signals (Realtek 8922AE / RTL88xx, MediaTek, “Wi‑Fi 6/7”). Virtual adapters are classified before Ethernet NIC-type heuristics.
 - Settings / Choose adapters use a modern dark panel UI and list every NIC with type/status hints.
 - If a toggle fails, the error lists what was searched and which adapters were found; confirm elevation and that names match `ncpa.cpl`.
