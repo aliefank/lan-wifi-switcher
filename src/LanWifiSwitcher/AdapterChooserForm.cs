@@ -144,8 +144,8 @@ public sealed class AdapterChooserForm : Form
         for (var i = 0; i < list.Items.Count; i++)
         {
             if (list.Items[i] is NetworkAdapterInfo a &&
-                (string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase) ||
-                 string.Equals(a.DeviceId, id, StringComparison.OrdinalIgnoreCase)))
+                (NetworkAdapterService.NamesEqual(a.Name, name) ||
+                 string.Equals(a.DeviceId?.Trim(), id?.Trim(), StringComparison.OrdinalIgnoreCase)))
             {
                 list.SelectedIndex = i;
                 return;

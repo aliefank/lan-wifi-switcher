@@ -163,8 +163,8 @@ public sealed class SettingsForm : Form
         for (var i = 0; i < adapters.Count; i++)
         {
             var a = adapters[i];
-            if (string.Equals(a.Name, selectedName, StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(a.DeviceId, selectedId, StringComparison.OrdinalIgnoreCase))
+            if (NetworkAdapterService.NamesEqual(a.Name, selectedName) ||
+                string.Equals(a.DeviceId?.Trim(), selectedId?.Trim(), StringComparison.OrdinalIgnoreCase))
             {
                 matchIndex = i;
                 break;
