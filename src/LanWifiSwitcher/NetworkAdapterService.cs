@@ -17,6 +17,7 @@ public sealed class NetworkAdapterService
         @"^ethernet(\s+\d+)?$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    // After NormalizeConnectionName, Unicode hyphens become ASCII '-' so "Wi‑Fi" matches.
     private static readonly Regex WifiAliasRegex = new(
         @"^(wi[-\s]?fi|wifi|wlan)(\s+\d+)?$",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
@@ -36,13 +37,15 @@ public sealed class NetworkAdapterService
             {
                 using (mo)
                 {
-                    var connectionName = mo["NetConnectionID"]?.ToString();
+                    // Keep the raw NetConnectionID for WMI/netsh; normalize only when comparing.
+                    // Some stacks return "Wi‑Fi" (U+2011) while ncpa.cpl displays "Wi-Fi".
+                    var connectionName = mo["NetConnectionID"]?.ToString()?.Trim();
                     if (string.IsNullOrWhiteSpace(connectionName))
                     {
                         continue;
                     }
 
-                    var deviceId = mo["DeviceID"]?.ToString() ?? connectionName;
+                    var deviceId = mo["DeviceID"]?.ToString()?.Trim() ?? connectionName;
                     var description = mo["Description"]?.ToString()
                                       ?? mo["ProductName"]?.ToString();
                     var name = mo["Name"]?.ToString() ?? connectionName;
@@ -66,11 +69,15 @@ public sealed class NetworkAdapterService
                     else
                     {
                         matchedNic = nicByIndex.Values.FirstOrDefault(n =>
-                            string.Equals(n.Name, connectionName, StringComparison.OrdinalIgnoreCase));
+                            NamesEqual(n.Name, connectionName));
                     }
 
                     var haystack = BuildHaystack(connectionName, description, name, manufacturer, pnp);
-                    var ignored = LooksVirtualOrNonPhysical(haystack) || physical == false;
+                    var looksVirtual = LooksVirtualOrNonPhysical(haystack);
+                    // Canonical ncpa.cpl aliases win over a false PhysicalAdapter flag from some drivers.
+                    var clearAlias = AliasScore(connectionName, wifi: true) > 0
+                                     || AliasScore(connectionName, wifi: false) > 0;
+                    var ignored = looksVirtual || (physical == false && !clearAlias);
                     var kind = Classify(
                         connectionName,
                         description,
@@ -91,7 +98,7 @@ public sealed class NetworkAdapterService
                         IsConnected = connected,
                         InterfaceIndex = ifIndex,
                         PnpDeviceId = pnp,
-                        IsVirtualOrIgnored = ignored || kind == AdapterKind.Other && LooksVirtualOrNonPhysical(haystack)
+                        IsVirtualOrIgnored = ignored || (kind == AdapterKind.Other && looksVirtual)
                     });
                 }
             }
@@ -138,22 +145,32 @@ public sealed class NetworkAdapterService
             .ToList();
     }
 
-    public NetworkAdapterInfo? FindByNameOrId(string? nameOrId)
+    public NetworkAdapterInfo? FindByNameOrId(string? nameOrId) =>
+        FindByNameOrId(GetAdapters(), nameOrId);
+
+    public NetworkAdapterInfo? FindByNameOrId(IReadOnlyList<NetworkAdapterInfo> adapters, string? nameOrId)
     {
-        if (string.IsNullOrWhiteSpace(nameOrId))
+        if (string.IsNullOrWhiteSpace(nameOrId) || adapters.Count == 0)
         {
             return null;
         }
 
-        var adapters = GetAdapters();
-        // Prefer NetConnectionID / alias match over DeviceID (indices can reshuffle).
-        return adapters.FirstOrDefault(a =>
-                   string.Equals(a.Name, nameOrId, StringComparison.OrdinalIgnoreCase))
+        var needle = NormalizeConnectionName(nameOrId);
+        if (string.IsNullOrWhiteSpace(needle))
+        {
+            return null;
+        }
+
+        // Prefer NetConnectionID / alias match over DeviceID (indices can reshuffle after reboot/driver update).
+        return adapters.FirstOrDefault(a => NamesEqual(a.Name, needle))
                ?? adapters.FirstOrDefault(a =>
-                   string.Equals(a.DeviceId, nameOrId, StringComparison.OrdinalIgnoreCase))
+                   string.Equals(a.DeviceId?.Trim(), needle, StringComparison.OrdinalIgnoreCase))
+               ?? adapters.FirstOrDefault(a =>
+                   a.Description is not null && NamesEqual(a.Description, needle))
                ?? adapters.FirstOrDefault(a =>
                    a.Description is not null &&
-                   string.Equals(a.Description, nameOrId, StringComparison.OrdinalIgnoreCase));
+                   a.Description.Contains(needle, StringComparison.OrdinalIgnoreCase) &&
+                   needle.Length >= 5);
     }
 
     /// <summary>
@@ -164,8 +181,14 @@ public sealed class NetworkAdapterService
     {
         var adapters = GetAdapters();
 
-        var ethernetOk = IsSuitableLan(Resolve(config.EthernetAdapterId, config.EthernetAdapterName));
-        if (!ethernetOk)
+        var ethernet = ResolveRole(adapters, config.EthernetAdapterId, config.EthernetAdapterName, AdapterKind.Ethernet);
+        if (IsSuitableLan(ethernet))
+        {
+            // Refresh stored DeviceId while keeping the preferred NetConnectionID alias.
+            config.EthernetAdapterId = ethernet!.DeviceId;
+            config.EthernetAdapterName = ethernet.Name;
+        }
+        else
         {
             if (repairUnsuitable)
             {
@@ -176,7 +199,8 @@ public sealed class NetworkAdapterService
             if (string.IsNullOrWhiteSpace(config.EthernetAdapterName) &&
                 string.IsNullOrWhiteSpace(config.EthernetAdapterId))
             {
-                var ethernet = PickBest(adapters, AdapterKind.Ethernet, preferWifiAlias: false);
+                ethernet = PickBest(adapters, AdapterKind.Ethernet, preferWifiAlias: false)
+                           ?? ResolveByCanonicalAlias(adapters, wifi: false);
                 if (ethernet is not null)
                 {
                     config.EthernetAdapterId = ethernet.DeviceId;
@@ -184,16 +208,14 @@ public sealed class NetworkAdapterService
                 }
             }
         }
-        else
-        {
-            // Refresh stored DeviceId while keeping the preferred NetConnectionID alias.
-            var current = Resolve(config.EthernetAdapterId, config.EthernetAdapterName)!;
-            config.EthernetAdapterId = current.DeviceId;
-            config.EthernetAdapterName = current.Name;
-        }
 
-        var wifiOk = IsSuitableWifi(Resolve(config.WifiAdapterId, config.WifiAdapterName));
-        if (!wifiOk)
+        var wifi = ResolveRole(adapters, config.WifiAdapterId, config.WifiAdapterName, AdapterKind.Wireless);
+        if (IsSuitableWifi(wifi))
+        {
+            config.WifiAdapterId = wifi!.DeviceId;
+            config.WifiAdapterName = wifi.Name;
+        }
+        else
         {
             if (repairUnsuitable)
             {
@@ -204,7 +226,9 @@ public sealed class NetworkAdapterService
             if (string.IsNullOrWhiteSpace(config.WifiAdapterName) &&
                 string.IsNullOrWhiteSpace(config.WifiAdapterId))
             {
-                var wifi = PickBest(adapters, AdapterKind.Wireless, preferWifiAlias: true);
+                wifi = PickBest(adapters, AdapterKind.Wireless, preferWifiAlias: true)
+                       ?? ResolveByCanonicalAlias(adapters, wifi: true)
+                       ?? ResolveByWifiChipset(adapters);
                 if (wifi is not null)
                 {
                     config.WifiAdapterId = wifi.DeviceId;
@@ -212,18 +236,13 @@ public sealed class NetworkAdapterService
                 }
             }
         }
-        else
-        {
-            var current = Resolve(config.WifiAdapterId, config.WifiAdapterName)!;
-            config.WifiAdapterId = current.DeviceId;
-            config.WifiAdapterName = current.Name;
-        }
     }
 
     public ConnectionMode DetectCurrentMode(AppConfig config)
     {
-        var ethernet = Resolve(config.EthernetAdapterId, config.EthernetAdapterName);
-        var wifi = Resolve(config.WifiAdapterId, config.WifiAdapterName);
+        var adapters = GetAdapters();
+        var ethernet = ResolveRole(adapters, config.EthernetAdapterId, config.EthernetAdapterName, AdapterKind.Ethernet);
+        var wifi = ResolveRole(adapters, config.WifiAdapterId, config.WifiAdapterName, AdapterKind.Wireless);
 
         // Mode is based on admin enable/disable — NOT cable/media connected.
         var lanOn = ethernet?.IsEnabled == true;
@@ -238,12 +257,13 @@ public sealed class NetworkAdapterService
 
     public ConnectionMode Toggle(AppConfig config)
     {
-        // Repair stale TAP/VPN picks before toggling.
+        // Repair stale TAP/VPN picks / DeviceID reshuffles before toggling.
         AutoSelectDefaults(config, repairUnsuitable: true);
         config.Save();
 
-        var ethernet = ResolveRequired(config.EthernetAdapterId, config.EthernetAdapterName, "Ethernet / LAN");
-        var wifi = ResolveRequired(config.WifiAdapterId, config.WifiAdapterName, "Wi‑Fi");
+        var adapters = GetAdapters();
+        var ethernet = ResolveRequired(adapters, config.EthernetAdapterId, config.EthernetAdapterName, "Ethernet / LAN", AdapterKind.Ethernet);
+        var wifi = ResolveRequired(adapters, config.WifiAdapterId, config.WifiAdapterName, "Wi‑Fi", AdapterKind.Wireless);
 
         var mode = DetectCurrentMode(config);
         var target = mode == ConnectionMode.Wifi ? ConnectionMode.Lan : ConnectionMode.Wifi;
@@ -260,8 +280,12 @@ public sealed class NetworkAdapterService
             throw new ArgumentOutOfRangeException(nameof(target));
         }
 
-        var ethernet = ResolveRequired(config.EthernetAdapterId, config.EthernetAdapterName, "Ethernet / LAN");
-        var wifi = ResolveRequired(config.WifiAdapterId, config.WifiAdapterName, "Wi‑Fi");
+        AutoSelectDefaults(config, repairUnsuitable: true);
+        config.Save();
+
+        var adapters = GetAdapters();
+        var ethernet = ResolveRequired(adapters, config.EthernetAdapterId, config.EthernetAdapterName, "Ethernet / LAN", AdapterKind.Ethernet);
+        var wifi = ResolveRequired(adapters, config.WifiAdapterId, config.WifiAdapterName, "Wi‑Fi", AdapterKind.Wireless);
         ApplyTarget(ethernet, wifi, target);
         Thread.Sleep(500);
     }
@@ -331,25 +355,160 @@ public sealed class NetworkAdapterService
 
     private NetworkAdapterInfo? Resolve(string? id, string? name)
     {
-        // Alias / NetConnectionID first, then DeviceID.
-        return FindByNameOrId(name) ?? FindByNameOrId(id);
+        var adapters = GetAdapters();
+        return ResolveRole(adapters, id, name, preferredKind: null);
     }
 
-    private NetworkAdapterInfo ResolveRequired(string? id, string? name, string label)
+    /// <summary>
+    /// Resolve saved config by NetConnectionID first, then DeviceID.
+    /// If that fails (or points at the wrong kind / a virtual NIC), re-resolve by
+    /// canonical alias ("Wi-Fi" / "Ethernet") and Wi‑Fi chipset hints.
+    /// </summary>
+    private NetworkAdapterInfo? ResolveRole(
+        IReadOnlyList<NetworkAdapterInfo> adapters,
+        string? id,
+        string? name,
+        AdapterKind? preferredKind)
     {
-        var adapter = Resolve(id, name);
+        // Alias / NetConnectionID first, then DeviceID (indices reshuffle across boots).
+        NetworkAdapterInfo? byConfig = null;
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            byConfig = FindByNameOrId(adapters, name);
+        }
+
+        byConfig ??= FindByNameOrId(adapters, id);
+
+        if (byConfig is not null && IsSuitableForRole(byConfig, preferredKind))
+        {
+            return byConfig;
+        }
+
+        // Saved config missed or unsuitable — re-resolve by role.
+        if (preferredKind == AdapterKind.Wireless)
+        {
+            return ResolveByCanonicalAlias(adapters, wifi: true)
+                   ?? ResolveByWifiChipset(adapters)
+                   ?? PickBest(adapters, AdapterKind.Wireless, preferWifiAlias: true);
+        }
+
+        if (preferredKind == AdapterKind.Ethernet)
+        {
+            return ResolveByCanonicalAlias(adapters, wifi: false)
+                   ?? PickBest(adapters, AdapterKind.Ethernet, preferWifiAlias: false);
+        }
+
+        return byConfig;
+    }
+
+    private static bool IsSuitableForRole(NetworkAdapterInfo adapter, AdapterKind? preferredKind) =>
+        preferredKind switch
+        {
+            AdapterKind.Wireless => IsSuitableWifi(adapter),
+            AdapterKind.Ethernet => IsSuitableLan(adapter),
+            _ => !adapter.IsVirtualOrIgnored
+        };
+
+    private NetworkAdapterInfo ResolveRequired(
+        IReadOnlyList<NetworkAdapterInfo> adapters,
+        string? id,
+        string? name,
+        string label,
+        AdapterKind preferredKind)
+    {
+        var adapter = ResolveRole(adapters, id, name, preferredKind);
         if (adapter is null)
         {
-            var configured = string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(id)
-                ? "nothing is saved yet"
-                : $"configured as name='{name ?? "(none)"}', id='{id ?? "(none)"}'";
-            throw new InvalidOperationException(
-                $"{label} adapter was not found ({configured}). " +
-                "Open Choose adapters… and pick the ncpa.cpl aliases \"Ethernet\" and \"Wi-Fi\" " +
-                "(ignore Bluetooth / TAP / OpenVPN).");
+            throw new InvalidOperationException(BuildNotFoundMessage(adapters, id, name, label, preferredKind));
         }
 
         return adapter;
+    }
+
+    private static string BuildNotFoundMessage(
+        IReadOnlyList<NetworkAdapterInfo> adapters,
+        string? id,
+        string? name,
+        string label,
+        AdapterKind preferredKind)
+    {
+        var searched = new List<string>();
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            searched.Add($"saved name '{NormalizeConnectionName(name)}'");
+        }
+
+        if (!string.IsNullOrWhiteSpace(id))
+        {
+            searched.Add($"saved id '{id.Trim()}'");
+        }
+
+        if (preferredKind == AdapterKind.Wireless)
+        {
+            searched.Add("alias 'Wi-Fi' / 'WiFi' / 'WLAN'");
+            searched.Add("description hints (Realtek 8922AE, WiFi 7, 802.11, …)");
+        }
+        else if (preferredKind == AdapterKind.Ethernet)
+        {
+            searched.Add("alias 'Ethernet'");
+        }
+
+        var searchedText = searched.Count == 0
+            ? "nothing configured yet"
+            : string.Join("; ", searched);
+
+        var visible = adapters
+            .Where(a => !a.IsVirtualOrIgnored)
+            .Select(a => $"{a.Name} [{a.KindLabel}, id={a.DeviceId}]")
+            .ToList();
+        var ignored = adapters
+            .Where(a => a.IsVirtualOrIgnored)
+            .Select(a => a.Name)
+            .ToList();
+
+        var foundText = visible.Count == 0
+            ? "no physical adapters were returned by WMI/NetworkInterface"
+            : "found: " + string.Join(", ", visible);
+        if (ignored.Count > 0)
+        {
+            foundText += "; ignored: " + string.Join(", ", ignored);
+        }
+
+        return
+            $"{label} adapter was not found. Searched {searchedText}. {foundText}. " +
+            "Open Choose adapters… and pick the ncpa.cpl aliases \"Ethernet\" and \"Wi-Fi\" " +
+            "(ignore Bluetooth / TAP / OpenVPN).";
+    }
+
+    private static NetworkAdapterInfo? ResolveByCanonicalAlias(
+        IReadOnlyList<NetworkAdapterInfo> adapters,
+        bool wifi)
+    {
+        return adapters
+            .Where(a => !a.IsVirtualOrIgnored)
+            .Where(a => wifi
+                ? a.Kind is AdapterKind.Wireless or AdapterKind.Unknown || AliasScore(a.Name, wifi: true) > 0
+                : a.Kind is AdapterKind.Ethernet or AdapterKind.Unknown || AliasScore(a.Name, wifi: false) > 0)
+            .OrderByDescending(a => AliasScore(a.Name, wifi))
+            .ThenByDescending(a => a.IsEnabled)
+            .ThenByDescending(a => a.IsConnected)
+            .FirstOrDefault(a => AliasScore(a.Name, wifi) >= 90);
+    }
+
+    private static NetworkAdapterInfo? ResolveByWifiChipset(IReadOnlyList<NetworkAdapterInfo> adapters)
+    {
+        return adapters
+            .Where(a => !a.IsVirtualOrIgnored)
+            .Where(a =>
+            {
+                var hay = BuildHaystack(a);
+                return LooksWireless(hay);
+            })
+            .OrderByDescending(a => AliasScore(a.Name, wifi: true))
+            .ThenByDescending(a => a.Kind == AdapterKind.Wireless)
+            .ThenByDescending(a => a.IsEnabled)
+            .ThenByDescending(a => a.IsConnected)
+            .FirstOrDefault();
     }
 
     private static NetworkAdapterInfo? PickBest(
@@ -378,7 +537,12 @@ public sealed class NetworkAdapterService
     /// </summary>
     internal static int AliasScore(string connectionName, bool wifi)
     {
-        var n = connectionName.Trim();
+        var n = NormalizeConnectionName(connectionName);
+        if (string.IsNullOrEmpty(n))
+        {
+            return 0;
+        }
+
         if (wifi)
         {
             if (n.Equals("Wi-Fi", StringComparison.OrdinalIgnoreCase) ||
@@ -408,6 +572,53 @@ public sealed class NetworkAdapterService
 
         return 0;
     }
+
+    /// <summary>
+    /// Normalize ncpa.cpl / WMI NetConnectionID quirks: Unicode hyphens, NBSP, trim, collapse spaces.
+    /// Windows 11 often shows "Wi-Fi"; some APIs return "Wi‑Fi" (U+2011) which breaks OrdinalIgnoreCase.
+    /// </summary>
+    internal static string NormalizeConnectionName(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var sb = new StringBuilder(value.Length);
+        var pendingSpace = false;
+        foreach (var ch in value.Trim())
+        {
+            var mapped = ch switch
+            {
+                '\u00A0' or '\u202F' or '\u2007' => ' ', // NBSP / NNBSP / figure space
+                '\u2010' or '\u2011' or '\u2012' or '\u2013' or '\u2014' or '\u2212' => '-', // hyphens/dashes/minus
+                '\t' or '\r' or '\n' => ' ',
+                _ => ch
+            };
+
+            if (char.IsWhiteSpace(mapped))
+            {
+                pendingSpace = sb.Length > 0;
+                continue;
+            }
+
+            if (pendingSpace)
+            {
+                sb.Append(' ');
+                pendingSpace = false;
+            }
+
+            sb.Append(mapped);
+        }
+
+        return sb.ToString();
+    }
+
+    internal static bool NamesEqual(string? left, string? right) =>
+        string.Equals(
+            NormalizeConnectionName(left),
+            NormalizeConnectionName(right),
+            StringComparison.OrdinalIgnoreCase);
 
     private static bool ReadNetEnabled(ManagementObject mo)
     {
@@ -457,11 +668,8 @@ public sealed class NetworkAdapterService
 
         try
         {
-            // Prefer NetConnectionID (ncpa.cpl alias) — "Wi-Fi" / "Ethernet".
-            if (InvokeWmiByQuery(
-                    "SELECT * FROM Win32_NetworkAdapter WHERE NetConnectionID = '" + EscapeWmi(adapter.Name) + "'",
-                    method,
-                    out lastResult))
+            // Match NetConnectionID with normalized equality (ASCII vs Unicode hyphen).
+            if (InvokeWmiByConnectionName(adapter.Name, method, out lastResult))
             {
                 return true;
             }
@@ -491,6 +699,33 @@ public sealed class NetworkAdapterService
         {
             error = $"WMI error: {ex.Message}";
             return false;
+        }
+
+        return false;
+    }
+
+    private static bool InvokeWmiByConnectionName(string connectionName, string method, out uint? lastResult)
+    {
+        lastResult = null;
+        using var searcher = new ManagementObjectSearcher(
+            "SELECT * FROM Win32_NetworkAdapter WHERE NetConnectionID IS NOT NULL");
+        foreach (ManagementObject mo in searcher.Get())
+        {
+            using (mo)
+            {
+                var id = mo["NetConnectionID"]?.ToString();
+                if (!NamesEqual(id, connectionName))
+                {
+                    continue;
+                }
+
+                var result = (uint)mo.InvokeMethod(method, null!);
+                lastResult = result;
+                if (result is 0 or 5)
+                {
+                    return true;
+                }
+            }
         }
 
         return false;
@@ -607,13 +842,14 @@ public sealed class NetworkAdapterService
             return AdapterKind.Other;
         }
 
-        // 2) Canonical Windows aliases are authoritative.
-        if (WifiAliasRegex.IsMatch(connectionName.Trim()) || LooksWireless(haystack))
+        // 2) Canonical Windows aliases are authoritative (after Unicode hyphen normalize).
+        var alias = NormalizeConnectionName(connectionName);
+        if (WifiAliasRegex.IsMatch(alias) || LooksWireless(haystack))
         {
             return AdapterKind.Wireless;
         }
 
-        if (EthernetAliasRegex.IsMatch(connectionName.Trim()))
+        if (EthernetAliasRegex.IsMatch(alias))
         {
             return AdapterKind.Ethernet;
         }
