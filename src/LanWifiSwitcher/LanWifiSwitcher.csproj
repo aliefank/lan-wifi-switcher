@@ -11,7 +11,7 @@
     <RootNamespace>LanWifiSwitcher</RootNamespace>
     <Product>LAN Wi‑Fi Switcher</Product>
     <Description>System-tray app to instantly toggle between Ethernet (LAN) and Wi‑Fi adapters.</Description>
-    <Version>1.0.5</Version>
+    <Version>1.0.6</Version>
     <Authors>aliefank</Authors>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
     <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
