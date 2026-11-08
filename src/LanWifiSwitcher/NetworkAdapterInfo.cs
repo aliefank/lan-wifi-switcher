@@ -19,6 +19,7 @@ public enum ConnectionMode
 
 public sealed class NetworkAdapterInfo
 {
+    /// <summary>Prefer WMI <c>DeviceID</c> (numeric). May be a NetCfg GUID when only NetworkInterface is available.</summary>
     public required string DeviceId { get; init; }
     /// <summary>NetConnectionID / interface alias shown in ncpa.cpl (e.g. "Wi-Fi", "Ethernet").</summary>
     public required string Name { get; init; }
@@ -29,6 +30,8 @@ public sealed class NetworkAdapterInfo
     public bool IsConnected { get; init; }
     public uint? InterfaceIndex { get; init; }
     public string? PnpDeviceId { get; init; }
+    /// <summary><c>Win32_NetworkAdapter.GUID</c> / <c>NetworkInterface.Id</c> (NetCfgInstanceId), when known.</summary>
+    public string? NetCfgInstanceId { get; init; }
     /// <summary>Virtual / VPN / Bluetooth / TAP — never auto-picked for LAN/Wi‑Fi roles.</summary>
     public bool IsVirtualOrIgnored { get; init; }
 

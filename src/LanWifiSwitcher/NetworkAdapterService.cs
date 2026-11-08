@@ -1,5 +1,7 @@
 using System.Management;
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -65,8 +67,27 @@ public sealed class NetworkAdapterService
 
     private static NetworkAdapterInfo PreferRicher(NetworkAdapterInfo a, NetworkAdapterInfo b)
     {
-        // Prefer the entry with a better kind, non-ignored flag, and a numeric WMI DeviceID when possible.
-        return RichnessScore(b) > RichnessScore(a) ? b : a;
+        // Prefer the richer classification, but always keep a numeric WMI DeviceID when either side has one.
+        // NetworkInterface.Id is a NetCfg GUID and must not replace WMI DeviceID for Enable/Disable.
+        var primary = RichnessScore(b) > RichnessScore(a) ? b : a;
+        var secondary = ReferenceEquals(primary, a) ? b : a;
+
+        return new NetworkAdapterInfo
+        {
+            DeviceId = PreferNumericDeviceId(primary.DeviceId, secondary.DeviceId),
+            Name = primary.Name,
+            Description = primary.Description ?? secondary.Description,
+            Kind = primary.Kind != AdapterKind.Other && primary.Kind != AdapterKind.Unknown
+                ? primary.Kind
+                : secondary.Kind,
+            IsEnabled = primary.IsEnabled || secondary.IsEnabled,
+            IsConnected = primary.IsConnected || secondary.IsConnected,
+            InterfaceIndex = primary.InterfaceIndex ?? secondary.InterfaceIndex,
+            PnpDeviceId = primary.PnpDeviceId ?? secondary.PnpDeviceId,
+            NetCfgInstanceId = primary.NetCfgInstanceId ?? secondary.NetCfgInstanceId
+                               ?? AsNetCfgGuid(primary.DeviceId) ?? AsNetCfgGuid(secondary.DeviceId),
+            IsVirtualOrIgnored = primary.IsVirtualOrIgnored && secondary.IsVirtualOrIgnored
+        };
     }
 
     private static int RichnessScore(NetworkAdapterInfo a)
@@ -75,10 +96,28 @@ public sealed class NetworkAdapterService
         if (!a.IsVirtualOrIgnored) score += 8;
         if (a.Kind is AdapterKind.Ethernet or AdapterKind.Wireless) score += 4;
         if (a.InterfaceIndex is not null) score += 2;
-        if (uint.TryParse(a.DeviceId, out _)) score += 1;
+        // Strongly prefer WMI numeric DeviceID over NetworkInterface GUID.
+        if (uint.TryParse(a.DeviceId, out _)) score += 10;
+        if (!string.IsNullOrWhiteSpace(a.NetCfgInstanceId)) score += 1;
         if (a.IsEnabled) score += 1;
         if (a.IsConnected) score += 1;
         return score;
+    }
+
+    private static string PreferNumericDeviceId(string primary, string secondary) =>
+        uint.TryParse(primary, out _) ? primary
+        : uint.TryParse(secondary, out _) ? secondary
+        : primary;
+
+    private static string? AsNetCfgGuid(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var trimmed = value.Trim().Trim('{', '}');
+        return Guid.TryParse(trimmed, out var guid) ? guid.ToString("B") : null;
     }
 
     private static IEnumerable<NetworkAdapterInfo> EnumerateFromWmi(Dictionary<uint, NetworkInterface> nicByIndex)
@@ -87,7 +126,7 @@ public sealed class NetworkAdapterService
         try
         {
             using var searcher = new ManagementObjectSearcher(
-                "SELECT DeviceID, Name, NetConnectionID, NetEnabled, NetConnectionStatus, AdapterTypeId, InterfaceIndex, Description, PNPDeviceID, ProductName, Manufacturer, PhysicalAdapter " +
+                "SELECT DeviceID, Name, NetConnectionID, NetEnabled, NetConnectionStatus, AdapterTypeId, InterfaceIndex, Description, PNPDeviceID, ProductName, Manufacturer, PhysicalAdapter, GUID " +
                 "FROM Win32_NetworkAdapter WHERE NetConnectionID IS NOT NULL");
             // Materialize inside try so a late enumerator failure still falls through cleanly.
             rows = searcher.Get().Cast<ManagementObject>().ToList();
@@ -119,6 +158,7 @@ public sealed class NetworkAdapterService
                 var connected = status == 2;
                 uint? ifIndex = mo["InterfaceIndex"] is null ? null : Convert.ToUInt32(mo["InterfaceIndex"]);
                 var pnp = mo["PNPDeviceID"]?.ToString();
+                var guid = AsNetCfgGuid(mo["GUID"]?.ToString());
                 ushort? adapterTypeId = mo["AdapterTypeId"] is null
                     ? null
                     : Convert.ToUInt16(mo["AdapterTypeId"]);
@@ -134,6 +174,8 @@ public sealed class NetworkAdapterService
                     matchedNic = nicByIndex.Values.FirstOrDefault(n => NamesEqual(n.Name, connectionName));
                 }
 
+                guid ??= AsNetCfgGuid(matchedNic?.Id);
+
                 yield return BuildAdapterInfo(
                     connectionName,
                     deviceId,
@@ -146,7 +188,8 @@ public sealed class NetworkAdapterService
                     ifIndex,
                     adapterTypeId,
                     physical,
-                    matchedNic?.NetworkInterfaceType);
+                    matchedNic?.NetworkInterfaceType,
+                    guid);
             }
         }
     }
@@ -184,6 +227,7 @@ public sealed class NetworkAdapterService
                 // ignore
             }
 
+            var guid = AsNetCfgGuid(nic.Id);
             yield return BuildAdapterInfo(
                 connectionName: nic.Name,
                 deviceId: nic.Id,
@@ -196,7 +240,8 @@ public sealed class NetworkAdapterService
                 ifIndex: ifIndex,
                 adapterTypeId: null,
                 physical: null,
-                networkInterfaceType: nic.NetworkInterfaceType);
+                networkInterfaceType: nic.NetworkInterfaceType,
+                netCfgInstanceId: guid);
         }
     }
 
@@ -212,7 +257,8 @@ public sealed class NetworkAdapterService
         uint? ifIndex,
         ushort? adapterTypeId,
         bool? physical,
-        NetworkInterfaceType? networkInterfaceType)
+        NetworkInterfaceType? networkInterfaceType,
+        string? netCfgInstanceId)
     {
         var haystack = BuildHaystack(connectionName, description, hardwareName, manufacturer, pnp);
         var clearWifi = AliasScore(connectionName, wifi: true) >= 90;
@@ -255,6 +301,7 @@ public sealed class NetworkAdapterService
             IsConnected = connected,
             InterfaceIndex = ifIndex,
             PnpDeviceId = pnp,
+            NetCfgInstanceId = netCfgInstanceId ?? AsNetCfgGuid(deviceId),
             IsVirtualOrIgnored = ignored
         };
     }
@@ -422,10 +469,16 @@ public sealed class NetworkAdapterService
         var otherAdapter = target == ConnectionMode.Lan ? wifi : ethernet;
 
         SetEnabled(targetAdapter, enabled: true, bestEffort: false);
-        Thread.Sleep(250);
+        Thread.Sleep(300);
 
-        var disabled = TryDisableWithRetry(otherAdapter, retries: 1);
-        Thread.Sleep(350);
+        // Fire disable, but do not trust an immediate "still active" read — Windows route
+        // updates (and Realtek admin state) often settle ~0.5–1.5s later.
+        _ = TryDisableWithRetry(otherAdapter, retries: 2);
+
+        if (WaitForSwitchSuccess(target, targetAdapter.Name, otherAdapter.Name, timeoutMs: 2000))
+        {
+            return;
+        }
 
         var targetFresh = FindByNameOrId(targetAdapter.Name) ?? targetAdapter;
         var otherFresh = FindByNameOrId(otherAdapter.Name) ?? otherAdapter;
@@ -437,10 +490,9 @@ public sealed class NetworkAdapterService
                 "Confirm the app is elevated (UAC) and the name matches ncpa.cpl.");
         }
 
-        if (disabled || IsTrafficOnTarget(target, targetFresh, otherFresh))
+        // Last chance: target up and carrying / preferred over the old path.
+        if (IsTrafficOnTarget(target, targetFresh, otherFresh))
         {
-            // Soft success: target is up and the old adapter is no longer the active path,
-            // even if Disable returned a non-zero WMI/netsh code.
             return;
         }
 
@@ -448,6 +500,44 @@ public sealed class NetworkAdapterService
             $"Switched toward {(target == ConnectionMode.Lan ? "LAN" : "Wi‑Fi")}, but '{otherAdapter.Name}' " +
             $"(id {otherAdapter.DeviceId}) is still the active path. " +
             "Try Choose adapters… or disable it once in ncpa.cpl.");
+    }
+
+    /// <summary>
+    /// Poll for up to <paramref name="timeoutMs"/> while Windows finishes Disable + route update.
+    /// Success when the target is enabled and is (or becomes) the preferred / default path.
+    /// </summary>
+    private bool WaitForSwitchSuccess(
+        ConnectionMode target,
+        string targetName,
+        string otherName,
+        int timeoutMs)
+    {
+        var deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            var targetFresh = FindByNameOrId(targetName);
+            var otherFresh = FindByNameOrId(otherName);
+            if (targetFresh is not null &&
+                otherFresh is not null &&
+                targetFresh.IsEnabled &&
+                IsTrafficOnTarget(target, targetFresh, otherFresh))
+            {
+                return true;
+            }
+
+            if (Environment.TickCount64 >= deadline)
+            {
+                return false;
+            }
+
+            // Keep nudging disable while we wait — slow Realtek Wi‑Fi Disable is common.
+            if (otherFresh is { IsEnabled: true })
+            {
+                _ = SetEnabled(otherFresh, enabled: false, bestEffort: true);
+            }
+
+            Thread.Sleep(250);
+        }
     }
 
     private bool TryDisableWithRetry(NetworkAdapterInfo adapter, int retries)
@@ -459,7 +549,7 @@ public sealed class NetworkAdapterService
                 return true;
             }
 
-            Thread.Sleep(350);
+            Thread.Sleep(300);
             var refreshed = FindByNameOrId(adapter.Name);
             if (refreshed is { IsEnabled: false })
             {
@@ -478,7 +568,7 @@ public sealed class NetworkAdapterService
 
     /// <summary>
     /// True when the destination adapter is up and the old one is no longer carrying traffic
-    /// (disabled, or Wi‑Fi disconnected / Ethernet connected as appropriate).
+    /// (disabled, Wi‑Fi disconnected, Ethernet connected, or default route moved).
     /// </summary>
     private static bool IsTrafficOnTarget(
         ConnectionMode target,
@@ -495,16 +585,32 @@ public sealed class NetworkAdapterService
             return true;
         }
 
+        // Strongest signal: Windows best interface / default route already prefers the target.
+        if (IsLikelyDefaultRoute(targetFresh) && !IsLikelyDefaultRoute(otherFresh))
+        {
+            return true;
+        }
+
+        if (IsBestInterface(targetFresh))
+        {
+            return true;
+        }
+
         if (target == ConnectionMode.Lan)
         {
-            // LAN up (cable optional). Success if Wi‑Fi is disconnected / not associated,
-            // or Ethernet has link while Wi‑Fi does not.
+            // LAN up (cable optional). Success if Wi‑Fi is disconnected / not associated.
             if (!otherFresh.IsConnected)
             {
                 return true;
             }
 
             if (targetFresh.IsConnected && !otherFresh.IsConnected)
+            {
+                return true;
+            }
+
+            // Ethernet has link and a gateway even while Wi‑Fi is still draining.
+            if (targetFresh.IsConnected && HasIpv4Gateway(targetFresh))
             {
                 return true;
             }
@@ -523,8 +629,76 @@ public sealed class NetworkAdapterService
             return true;
         }
 
+        if (targetFresh.IsConnected && HasIpv4Gateway(targetFresh) && !HasIpv4Gateway(otherFresh))
+        {
+            return true;
+        }
+
         return false;
     }
+
+    private static bool IsLikelyDefaultRoute(NetworkAdapterInfo adapter) =>
+        HasIpv4Gateway(adapter) && adapter.IsEnabled &&
+        (adapter.IsConnected || adapter.Kind == AdapterKind.Ethernet);
+
+    private static bool HasIpv4Gateway(NetworkAdapterInfo adapter)
+    {
+        try
+        {
+            foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (!NamesEqual(nic.Name, adapter.Name) &&
+                    (adapter.NetCfgInstanceId is null ||
+                     !string.Equals(AsNetCfgGuid(nic.Id), AsNetCfgGuid(adapter.NetCfgInstanceId), StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                if (nic.OperationalStatus is OperationalStatus.Down or OperationalStatus.NotPresent)
+                {
+                    return false;
+                }
+
+                return nic.GetIPProperties().GatewayAddresses.Any(g =>
+                    g.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork &&
+                    !IPAddress.Any.Equals(g.Address) &&
+                    !IPAddress.None.Equals(g.Address));
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    private static bool IsBestInterface(NetworkAdapterInfo adapter)
+    {
+        if (adapter.InterfaceIndex is not uint ifIndex)
+        {
+            return false;
+        }
+
+        try
+        {
+            // 1.1.1.1 — ask the stack which interface would carry general Internet traffic.
+            var dest = BitConverter.ToUInt32(IPAddress.Parse("1.1.1.1").GetAddressBytes(), 0);
+            if (GetBestInterface(dest, out var best) == 0 && best == ifIndex)
+            {
+                return true;
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    [DllImport("iphlpapi.dll", SetLastError = true)]
+    private static extern int GetBestInterface(uint dwDestAddr, out uint pdwBestIfIndex);
 
     private ConnectionMode PreferTargetIfTrafficMoved(
         ConnectionMode target,
@@ -978,34 +1152,73 @@ public sealed class NetworkAdapterService
         error = null;
         var method = enabled ? "Enable" : "Disable";
         uint? lastResult = null;
+        var invoked = false;
 
         try
         {
-            // Match NetConnectionID with normalized equality (ASCII vs Unicode hyphen).
-            if (InvokeWmiByConnectionName(adapter.Name, method, out lastResult))
+            // 1) NetConnectionID (normalized) — most reliable for ncpa.cpl "Wi-Fi" / "Ethernet".
+            if (InvokeWmiByConnectionName(adapter.Name, method, out lastResult, out var byName))
             {
                 return true;
             }
 
-            if (InvokeWmiByQuery(
+            invoked |= byName;
+
+            // 2) Numeric WMI DeviceID only (GUID DeviceId would miss Win32_NetworkAdapter.DeviceID).
+            var byDeviceId = false;
+            if (uint.TryParse(adapter.DeviceId, out _) &&
+                InvokeWmiByQuery(
                     "SELECT * FROM Win32_NetworkAdapter WHERE DeviceID = '" + EscapeWmi(adapter.DeviceId) + "'",
                     method,
-                    out lastResult))
+                    out lastResult,
+                    out byDeviceId))
             {
                 return true;
             }
 
+            invoked |= byDeviceId;
+
+            // 3) NetCfgInstanceId / Win32_NetworkAdapter.GUID (braced).
+            var byGuid = false;
+            var guid = AsNetCfgGuid(adapter.NetCfgInstanceId) ?? AsNetCfgGuid(adapter.DeviceId);
+            if (guid is not null &&
+                InvokeWmiByQuery(
+                    "SELECT * FROM Win32_NetworkAdapter WHERE GUID = '" + EscapeWmi(guid) + "'",
+                    method,
+                    out lastResult,
+                    out byGuid))
+            {
+                return true;
+            }
+
+            invoked |= byGuid;
+
+            // 4) InterfaceIndex
+            var byIndex = false;
             if (adapter.InterfaceIndex is uint idx &&
                 InvokeWmiByQuery(
                     "SELECT * FROM Win32_NetworkAdapter WHERE InterfaceIndex = " + idx,
                     method,
-                    out lastResult))
+                    out lastResult,
+                    out byIndex))
             {
                 return true;
             }
 
+            invoked |= byIndex;
+
+            // Realtek often returns non-0/5 while the flip is still in flight — recheck admin state.
+            if (invoked)
+            {
+                Thread.Sleep(250);
+                if (IsAdapterInDesiredState(adapter.Name, enabled))
+                {
+                    return true;
+                }
+            }
+
             error = lastResult is null
-                ? "WMI: adapter object not found by name/id/index."
+                ? "WMI: adapter object not found by name/id/guid/index."
                 : $"WMI {method} returned code {lastResult} (0=ok, 5=already).";
         }
         catch (Exception ex)
@@ -1017,9 +1230,42 @@ public sealed class NetworkAdapterService
         return false;
     }
 
-    private static bool InvokeWmiByConnectionName(string connectionName, string method, out uint? lastResult)
+    private static bool IsAdapterInDesiredState(string connectionName, bool enabled)
+    {
+        try
+        {
+            using var searcher = new ManagementObjectSearcher(
+                "SELECT NetConnectionID, NetEnabled, NetConnectionStatus FROM Win32_NetworkAdapter WHERE NetConnectionID IS NOT NULL");
+            foreach (ManagementObject mo in searcher.Get())
+            {
+                using (mo)
+                {
+                    if (!NamesEqual(mo["NetConnectionID"]?.ToString(), connectionName))
+                    {
+                        continue;
+                    }
+
+                    return ReadNetEnabled(mo) == enabled ||
+                           (!enabled && Convert.ToUInt16(mo["NetConnectionStatus"] ?? 0) is not (1 or 2 or 8 or 9));
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return false;
+    }
+
+    private static bool InvokeWmiByConnectionName(
+        string connectionName,
+        string method,
+        out uint? lastResult,
+        out bool invoked)
     {
         lastResult = null;
+        invoked = false;
         using var searcher = new ManagementObjectSearcher(
             "SELECT * FROM Win32_NetworkAdapter WHERE NetConnectionID IS NOT NULL");
         foreach (ManagementObject mo in searcher.Get())
@@ -1032,8 +1278,10 @@ public sealed class NetworkAdapterService
                     continue;
                 }
 
+                invoked = true;
                 var result = (uint)mo.InvokeMethod(method, null!);
                 lastResult = result;
+                // 0 = success. 5 = already in requested state. Other codes may still flip — caller rechecks.
                 if (result is 0 or 5)
                 {
                     return true;
@@ -1044,14 +1292,20 @@ public sealed class NetworkAdapterService
         return false;
     }
 
-    private static bool InvokeWmiByQuery(string query, string method, out uint? lastResult)
+    private static bool InvokeWmiByQuery(
+        string query,
+        string method,
+        out uint? lastResult,
+        out bool invoked)
     {
         lastResult = null;
+        invoked = false;
         using var searcher = new ManagementObjectSearcher(query);
         foreach (ManagementObject mo in searcher.Get())
         {
             using (mo)
             {
+                invoked = true;
                 var result = (uint)mo.InvokeMethod(method, null!);
                 lastResult = result;
                 // 0 = success. 5 = often "already in requested state" on consumer NICs.

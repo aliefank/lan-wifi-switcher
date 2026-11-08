@@ -99,24 +99,42 @@ public sealed class TrayAppContext : ApplicationContext
         }
 
         _busy = true;
+        ConnectionMode? previous = null;
+        ConnectionMode intended = ConnectionMode.Unknown;
         try
         {
             Cursor.Current = Cursors.WaitCursor;
-            var previous = _network.DetectCurrentMode(_config);
+            previous = _network.DetectCurrentMode(_config);
+            intended = previous == ConnectionMode.Wifi ? ConnectionMode.Lan : ConnectionMode.Wifi;
             var next = _network.Toggle(_config);
             RefreshTrayPresentation(animateFrom: previous, settleMode: next);
 
             if (showToast)
             {
-                var text = ModeLabel(next);
-                _tray.BalloonTipTitle = "LAN Wi‑Fi Switcher";
-                _tray.BalloonTipText = $"Switched to {text} (was {ModeLabel(previous)}).";
-                _tray.BalloonTipIcon = ToolTipIcon.Info;
-                _tray.ShowBalloonTip(2500);
+                ShowSuccessToast(previous.Value, next);
             }
         }
         catch (Exception ex)
         {
+            // Race: Ethernet may already be up while Wi‑Fi Disable / route update finishes ~1s later.
+            // Don't show a hard error if the intended path landed.
+            Thread.Sleep(1000);
+            var landed = _network.DetectCurrentMode(_config);
+            if (previous is ConnectionMode from &&
+                (landed == intended ||
+                 (intended == ConnectionMode.Lan && landed is ConnectionMode.Lan or ConnectionMode.Both) ||
+                 (intended == ConnectionMode.Wifi && landed is ConnectionMode.Wifi or ConnectionMode.Both)))
+            {
+                var settle = intended is ConnectionMode.Lan or ConnectionMode.Wifi ? intended : landed;
+                RefreshTrayPresentation(animateFrom: from, settleMode: settle);
+                if (showToast)
+                {
+                    ShowSuccessToast(from, settle);
+                }
+
+                return;
+            }
+
             ShowToggleError(ex);
             RefreshTrayPresentation(animateFrom: null);
         }
@@ -125,6 +143,14 @@ public sealed class TrayAppContext : ApplicationContext
             Cursor.Current = Cursors.Default;
             _busy = false;
         }
+    }
+
+    private void ShowSuccessToast(ConnectionMode previous, ConnectionMode next)
+    {
+        _tray.BalloonTipTitle = "LAN Wi‑Fi Switcher";
+        _tray.BalloonTipText = $"Switched to {ModeLabel(next)} (was {ModeLabel(previous)}).";
+        _tray.BalloonTipIcon = ToolTipIcon.Info;
+        _tray.ShowBalloonTip(2500);
     }
 
     private void OpenSettings()
