@@ -390,8 +390,11 @@ public sealed class NetworkAdapterService
         var target = mode == ConnectionMode.Wifi ? ConnectionMode.Lan : ConnectionMode.Wifi;
 
         ApplyTarget(ethernet, wifi, target);
-        Thread.Sleep(500);
-        return DetectCurrentMode(config);
+        Thread.Sleep(400);
+
+        // Prefer the intended target when disable was best-effort but traffic already moved.
+        var detected = DetectCurrentMode(config);
+        return PreferTargetIfTrafficMoved(target, detected, ethernet.Name, wifi.Name);
     }
 
     public void SwitchTo(AppConfig config, ConnectionMode target)
@@ -408,38 +411,174 @@ public sealed class NetworkAdapterService
         var ethernet = ResolveRequired(adapters, config.EthernetAdapterId, config.EthernetAdapterName, "Ethernet / LAN", AdapterKind.Ethernet);
         var wifi = ResolveRequired(adapters, config.WifiAdapterId, config.WifiAdapterName, "Wi‑Fi", AdapterKind.Wireless);
         ApplyTarget(ethernet, wifi, target);
-        Thread.Sleep(500);
+        Thread.Sleep(400);
     }
 
     private void ApplyTarget(NetworkAdapterInfo ethernet, NetworkAdapterInfo wifi, ConnectionMode target)
     {
-        // Order: enable target first so the machine is never left with both down mid-toggle.
-        // Cable link is irrelevant — Enable/Disable is admin state only.
-        if (target == ConnectionMode.Lan)
+        // Enable the destination first so the machine is never left with both down mid-toggle.
+        // Then best-effort disable the source (Realtek Wi‑Fi Disable often returns non-zero even after success).
+        var targetAdapter = target == ConnectionMode.Lan ? ethernet : wifi;
+        var otherAdapter = target == ConnectionMode.Lan ? wifi : ethernet;
+
+        SetEnabled(targetAdapter, enabled: true, bestEffort: false);
+        Thread.Sleep(250);
+
+        var disabled = TryDisableWithRetry(otherAdapter, retries: 1);
+        Thread.Sleep(350);
+
+        var targetFresh = FindByNameOrId(targetAdapter.Name) ?? targetAdapter;
+        var otherFresh = FindByNameOrId(otherAdapter.Name) ?? otherAdapter;
+
+        if (!targetFresh.IsEnabled)
         {
-            SetEnabled(ethernet, enabled: true);
-            SetEnabled(wifi, enabled: false);
+            throw new InvalidOperationException(
+                $"Could not enable '{targetAdapter.Name}' (id {targetAdapter.DeviceId}). " +
+                "Confirm the app is elevated (UAC) and the name matches ncpa.cpl.");
         }
-        else
+
+        if (disabled || IsTrafficOnTarget(target, targetFresh, otherFresh))
         {
-            SetEnabled(wifi, enabled: true);
-            SetEnabled(ethernet, enabled: false);
+            // Soft success: target is up and the old adapter is no longer the active path,
+            // even if Disable returned a non-zero WMI/netsh code.
+            return;
         }
+
+        throw new InvalidOperationException(
+            $"Switched toward {(target == ConnectionMode.Lan ? "LAN" : "Wi‑Fi")}, but '{otherAdapter.Name}' " +
+            $"(id {otherAdapter.DeviceId}) is still the active path. " +
+            "Try Choose adapters… or disable it once in ncpa.cpl.");
     }
 
-    public void SetEnabled(NetworkAdapterInfo adapter, bool enabled)
+    private bool TryDisableWithRetry(NetworkAdapterInfo adapter, int retries)
+    {
+        for (var attempt = 0; attempt <= retries; attempt++)
+        {
+            if (SetEnabled(adapter, enabled: false, bestEffort: true))
+            {
+                return true;
+            }
+
+            Thread.Sleep(350);
+            var refreshed = FindByNameOrId(adapter.Name);
+            if (refreshed is { IsEnabled: false })
+            {
+                return true;
+            }
+
+            // Wi‑Fi may stay "enabled" briefly while NetConnectionStatus already shows disconnected.
+            if (refreshed is { IsConnected: false, Kind: AdapterKind.Wireless })
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// True when the destination adapter is up and the old one is no longer carrying traffic
+    /// (disabled, or Wi‑Fi disconnected / Ethernet connected as appropriate).
+    /// </summary>
+    private static bool IsTrafficOnTarget(
+        ConnectionMode target,
+        NetworkAdapterInfo targetFresh,
+        NetworkAdapterInfo otherFresh)
+    {
+        if (!targetFresh.IsEnabled)
+        {
+            return false;
+        }
+
+        if (!otherFresh.IsEnabled)
+        {
+            return true;
+        }
+
+        if (target == ConnectionMode.Lan)
+        {
+            // LAN up (cable optional). Success if Wi‑Fi is disconnected / not associated,
+            // or Ethernet has link while Wi‑Fi does not.
+            if (!otherFresh.IsConnected)
+            {
+                return true;
+            }
+
+            if (targetFresh.IsConnected && !otherFresh.IsConnected)
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        // Target Wi‑Fi: Ethernet disabled, or unplugged while Wi‑Fi is associated.
+        if (!otherFresh.IsConnected && targetFresh.IsConnected)
+        {
+            return true;
+        }
+
+        if (targetFresh.IsConnected && !otherFresh.IsEnabled)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private ConnectionMode PreferTargetIfTrafficMoved(
+        ConnectionMode target,
+        ConnectionMode detected,
+        string ethernetName,
+        string wifiName)
+    {
+        if (detected == target || detected is ConnectionMode.Unknown or ConnectionMode.Neither)
+        {
+            return detected == ConnectionMode.Unknown ? target : detected;
+        }
+
+        var ethernet = FindByNameOrId(ethernetName);
+        var wifi = FindByNameOrId(wifiName);
+        if (ethernet is null || wifi is null)
+        {
+            return detected;
+        }
+
+        if (target == ConnectionMode.Lan &&
+            IsTrafficOnTarget(ConnectionMode.Lan, ethernet, wifi))
+        {
+            return ConnectionMode.Lan;
+        }
+
+        if (target == ConnectionMode.Wifi &&
+            IsTrafficOnTarget(ConnectionMode.Wifi, wifi, ethernet))
+        {
+            return ConnectionMode.Wifi;
+        }
+
+        return detected;
+    }
+
+    public void SetEnabled(NetworkAdapterInfo adapter, bool enabled) =>
+        SetEnabled(adapter, enabled, bestEffort: false);
+
+    /// <summary>
+    /// Enable/disable an adapter. When <paramref name="bestEffort"/> is true, failures return false
+    /// instead of throwing (used when disabling the previous path after the target is already up).
+    /// </summary>
+    public bool SetEnabled(NetworkAdapterInfo adapter, bool enabled, bool bestEffort)
     {
         // Already in desired admin state — success even if cable is unplugged.
         if (adapter.IsEnabled == enabled)
         {
-            return;
+            return true;
         }
 
         var errors = new List<string>();
 
         if (TryWmiSetEnabled(adapter, enabled, out var wmiError))
         {
-            return;
+            return true;
         }
 
         if (!string.IsNullOrWhiteSpace(wmiError))
@@ -450,18 +589,29 @@ public sealed class NetworkAdapterService
         try
         {
             RunNetsh(adapter.Name, enabled);
-            return;
+            return true;
         }
         catch (Exception ex)
         {
             errors.Add(ex.Message);
         }
 
-        // Re-check: some drivers report odd WMI codes but still flip NetEnabled.
+        // Re-check: some drivers report odd WMI codes but still flip NetEnabled / disconnect media.
         var refreshed = FindByNameOrId(adapter.Name);
         if (refreshed is not null && refreshed.IsEnabled == enabled)
         {
-            return;
+            return true;
+        }
+
+        if (!enabled && refreshed is { IsConnected: false })
+        {
+            // Disable "failed" but the NIC is already media-disconnected — treat as OK.
+            return true;
+        }
+
+        if (bestEffort)
+        {
+            return false;
         }
 
         var action = enabled ? "enable" : "disable";
