@@ -17,6 +17,9 @@ public sealed class TrayAppContext : ApplicationContext
     private IReadOnlyList<Icon>? _animFrames;
     private int _animIndex;
     private ConnectionMode _animSettleMode;
+    private bool _toggleTransitionActive;
+    private const int LoopIntervalMs = 130;
+    private const int ToggleIntervalMs = 42;
 
     public TrayAppContext()
     {
@@ -27,7 +30,7 @@ public sealed class TrayAppContext : ApplicationContext
         StartupManager.SyncFromConfig(_config);
         _config.Save();
 
-        _animTimer = new System.Windows.Forms.Timer { Interval = 42 };
+        _animTimer = new System.Windows.Forms.Timer { Interval = LoopIntervalMs };
         _animTimer.Tick += OnAnimTick;
 
         _tray = new NotifyIcon
@@ -188,32 +191,73 @@ public sealed class TrayAppContext : ApplicationContext
         if (animateFrom is ConnectionMode from && from != mode)
         {
             _animSettleMode = mode;
+            _toggleTransitionActive = true;
             _animFrames = IconFactory.CreateToggleAnimation(from, mode);
             _animIndex = 0;
+            _animTimer.Interval = ToggleIntervalMs;
             ApplyIcon(_animFrames[0], ownsIcon: false);
             _animTimer.Start();
             return;
         }
 
-        ApplyIcon(IconFactory.CreateForMode(mode), ownsIcon: true);
+        StartContinuousLoop(mode);
+    }
+
+    private void StartContinuousLoop(ConnectionMode mode)
+    {
+        _animSettleMode = mode;
+        _toggleTransitionActive = false;
+
+        if (!IconFactory.SupportsContinuousLoop(mode))
+        {
+            _animTimer.Stop();
+            ApplyIcon(IconFactory.CreateForMode(mode), ownsIcon: true);
+            return;
+        }
+
+        _animFrames = IconFactory.CreateContinuousLoop(mode);
+        if (_animFrames.Count == 0)
+        {
+            ApplyIcon(IconFactory.CreateForMode(mode), ownsIcon: true);
+            return;
+        }
+
+        _animIndex = 0;
+        _animTimer.Interval = LoopIntervalMs;
+        ApplyIcon(_animFrames[0], ownsIcon: false);
+        _animTimer.Start();
     }
 
     private void OnAnimTick(object? sender, EventArgs e)
     {
-        if (_animFrames is null || _animIndex >= _animFrames.Count - 1)
+        if (_animFrames is null || _animFrames.Count == 0)
         {
-            StopAnimation(disposeFrames: true);
-            ApplyIcon(IconFactory.CreateForMode(_animSettleMode), ownsIcon: true);
+            _animTimer.Stop();
             return;
         }
 
-        _animIndex++;
+        if (_toggleTransitionActive)
+        {
+            if (_animIndex >= _animFrames.Count - 1)
+            {
+                StopAnimation(disposeFrames: true);
+                StartContinuousLoop(_animSettleMode);
+                return;
+            }
+
+            _animIndex++;
+            ApplyIcon(_animFrames[_animIndex], ownsIcon: false);
+            return;
+        }
+
+        _animIndex = (_animIndex + 1) % _animFrames.Count;
         ApplyIcon(_animFrames[_animIndex], ownsIcon: false);
     }
 
     private void StopAnimation(bool disposeFrames)
     {
         _animTimer.Stop();
+        _toggleTransitionActive = false;
         if (disposeFrames && _animFrames is not null)
         {
             // Detach before disposing so NotifyIcon is not left holding a freed HICON.

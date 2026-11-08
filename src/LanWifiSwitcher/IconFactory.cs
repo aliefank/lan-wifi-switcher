@@ -6,10 +6,12 @@ namespace LanWifiSwitcher;
 
 /// <summary>
 /// Windows 11–style tray icons: flat accent discs with clear LAN / Wi‑Fi glyphs.
-/// Also builds a short toggle animation (NotifyIcon frame swap).
+/// Short toggle transition plus continuous LAN / Wi‑Fi loop frames for the tray.
 /// </summary>
 public static class IconFactory
 {
+    public const int WifiLoopFrameCount = 14;
+    public const int LanLoopFrameCount = 12;
     // Fluent / Windows 11 accents — readable on light and dark taskbars.
     private static readonly Color LanAccent = Color.FromArgb(255, 0, 120, 212);   // Accent blue
     private static readonly Color WifiAccent = Color.FromArgb(255, 15, 148, 86);  // Signal green
@@ -56,6 +58,70 @@ public static class IconFactory
         frames.Add(CreateIcon(toAccent, GlyphFor(to), progress: 1f, scale: 1f));
 
         return frames;
+    }
+
+    /// <summary>
+    /// Continuous tray loop while LAN or Wi‑Fi is the active path. Caller disposes icons on mode change.
+    /// </summary>
+    public static IReadOnlyList<Icon> CreateContinuousLoop(ConnectionMode mode)
+    {
+        return mode switch
+        {
+            ConnectionMode.Wifi => CreateWifiLoopFrames(),
+            ConnectionMode.Lan => CreateLanLoopFrames(),
+            ConnectionMode.Both => CreateBothLoopFrames(),
+            _ => Array.Empty<Icon>()
+        };
+    }
+
+    public static bool SupportsContinuousLoop(ConnectionMode mode) =>
+        mode is ConnectionMode.Lan or ConnectionMode.Wifi or ConnectionMode.Both;
+
+    private static IReadOnlyList<Icon> CreateWifiLoopFrames()
+    {
+        // Signal arcs fill outward then ease back — reads at 16×16.
+        var frames = new List<Icon>(WifiLoopFrameCount);
+        for (var i = 0; i < WifiLoopFrameCount; i++)
+        {
+            var progress = TriangleWave(i / (float)WifiLoopFrameCount);
+            progress = 0.12f + progress * 0.88f;
+            frames.Add(CreateIcon(WifiAccent, DrawWifiGlyph, progress));
+        }
+
+        return frames;
+    }
+
+    private static IReadOnlyList<Icon> CreateLanLoopFrames()
+    {
+        // RJ45 plug steady; contact teeth + link pulse travel downward.
+        var frames = new List<Icon>(LanLoopFrameCount);
+        for (var i = 0; i < LanLoopFrameCount; i++)
+        {
+            var phase = i / (float)LanLoopFrameCount;
+            frames.Add(CreateIcon(LanAccent, DrawLanGlyph, progress: phase));
+        }
+
+        return frames;
+    }
+
+    private static IReadOnlyList<Icon> CreateBothLoopFrames()
+    {
+        const int n = 10;
+        var frames = new List<Icon>(n);
+        for (var i = 0; i < n; i++)
+        {
+            var t = TriangleWave(i / (float)n);
+            frames.Add(CreateIcon(BothAccent, DrawBothGlyph, progress: 0.35f + t * 0.65f));
+        }
+
+        return frames;
+    }
+
+    private static float TriangleWave(float t)
+    {
+        t %= 1f;
+        if (t < 0) t += 1f;
+        return t < 0.5f ? t * 2f : (1f - t) * 2f;
     }
 
     private static Color AccentFor(ConnectionMode mode) => mode switch
@@ -141,28 +207,52 @@ public static class IconFactory
         }
     }
 
-    /// <summary>Ethernet: rounded RJ45 body + contact teeth (reads at 16px).</summary>
+    /// <summary>Ethernet: RJ45 + sequenced teeth + downward link pulse (reads at 16px).</summary>
     private static void DrawLanGlyph(Graphics g, int size, float progress)
     {
-        using var pen = new Pen(Color.FromArgb((int)(255 * progress), Color.White), 2.5f)
+        using var bodyPen = new Pen(Color.White, 2.5f)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round,
             LineJoin = LineJoin.Round
         };
-        using var fill = new SolidBrush(Color.FromArgb((int)(255 * progress), Color.White));
+        using var fill = new SolidBrush(Color.White);
 
         var body = new RectangleF(9f, 8.5f, 14f, 10.5f);
-        g.DrawRoundedRectangle(pen, body, 2.2f);
+        g.DrawRoundedRectangle(bodyPen, body, 2.2f);
         g.FillRectangle(fill, 13.2f, 6.8f, 5.6f, 2.3f);
 
-        var teeth = (int)Math.Round(1 + 3 * progress);
-        for (var i = 0; i < teeth; i++)
+        for (var i = 0; i < 4; i++)
         {
+            var toothPhase = (progress + i * 0.18f) % 1f;
+            var alpha = (int)(255 * (0.35f + 0.65f * Pulse(toothPhase)));
+            using var toothPen = new Pen(Color.FromArgb(alpha, Color.White), 2.4f)
+            {
+                StartCap = LineCap.Round,
+                EndCap = LineCap.Round
+            };
             var x = 11.2f + i * 3f;
-            g.DrawLine(pen, x, 20.2f, x, 24.8f);
+            g.DrawLine(toothPen, x, 20.2f, x, 24.8f);
         }
+
+        // Cable/link pulse below the jack.
+        var linkY = 25.5f + progress * 5.5f;
+        var linkAlpha = (int)(220 * (1f - Math.Abs(progress * 2f - 1f)));
+        using (var linkPen = new Pen(Color.FromArgb(linkAlpha, Color.White), 2.6f)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round
+        })
+        {
+            g.DrawLine(linkPen, 16f, 19.8f, 16f, linkY);
+        }
+
+        using var dot = new SolidBrush(Color.FromArgb(Math.Clamp(linkAlpha + 35, 0, 255), Color.White));
+        g.FillEllipse(dot, 14.8f, Math.Min(linkY - 1.2f, 29.5f), 2.6f, 2.6f);
     }
+
+    private static float Pulse(float phase) =>
+        0.5f + 0.5f * MathF.Sin(phase * MathF.PI * 2f);
 
     /// <summary>Wi‑Fi: arcs reveal outward with progress (animation + steady state).</summary>
     private static void DrawWifiGlyph(Graphics g, int size, float progress)

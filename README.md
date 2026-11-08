@@ -13,7 +13,7 @@ Tray-only: no main window and no taskbar button on launch. Requires Administrato
   - **Toggle now** — same as left-click
   - **Run at startup** — checkable; writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
   - **Exit**
-- Tray **tooltip** and **icon** reflect the current mode (LAN vs Wi‑Fi), with a short animation on toggle.
+- Tray **tooltip** and **icon** reflect the current mode (LAN vs Wi‑Fi), with a short transition on toggle and a **continuous loop** (Wi‑Fi signal arcs / LAN link pulse) while that path is active.
 - Switching enables the target adapter first; disabling the previous one is **best-effort** with a short settle/poll (no hard error if Ethernet becomes the path even while Wi‑Fi Disable is slow).
 - Config persisted in `%AppData%\LanWifiSwitcher\config.json`.
 
