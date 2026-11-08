@@ -8,10 +8,15 @@ public sealed class TrayAppContext : ApplicationContext
 {
     private readonly NotifyIcon _tray;
     private readonly NetworkAdapterService _network = new();
+    private readonly System.Windows.Forms.Timer _animTimer;
     private AppConfig _config;
     private Icon? _currentIcon;
+    private bool _ownsCurrentIcon;
     private ToolStripMenuItem? _startupItem;
     private bool _busy;
+    private IReadOnlyList<Icon>? _animFrames;
+    private int _animIndex;
+    private ConnectionMode _animSettleMode;
 
     public TrayAppContext()
     {
@@ -22,6 +27,9 @@ public sealed class TrayAppContext : ApplicationContext
         StartupManager.SyncFromConfig(_config);
         _config.Save();
 
+        _animTimer = new System.Windows.Forms.Timer { Interval = 42 };
+        _animTimer.Tick += OnAnimTick;
+
         _tray = new NotifyIcon
         {
             Visible = true,
@@ -30,7 +38,7 @@ public sealed class TrayAppContext : ApplicationContext
         };
 
         _tray.MouseClick += OnTrayMouseClick;
-        RefreshTrayPresentation();
+        RefreshTrayPresentation(animateFrom: null);
     }
 
     private ContextMenuStrip BuildMenu()
@@ -96,7 +104,7 @@ public sealed class TrayAppContext : ApplicationContext
             Cursor.Current = Cursors.WaitCursor;
             var previous = _network.DetectCurrentMode(_config);
             var next = _network.Toggle(_config);
-            RefreshTrayPresentation();
+            RefreshTrayPresentation(animateFrom: previous, settleMode: next);
 
             if (showToast)
             {
@@ -110,7 +118,7 @@ public sealed class TrayAppContext : ApplicationContext
         catch (Exception ex)
         {
             ShowToggleError(ex);
-            RefreshTrayPresentation();
+            RefreshTrayPresentation(animateFrom: null);
         }
         finally
         {
@@ -130,7 +138,7 @@ public sealed class TrayAppContext : ApplicationContext
                 _startupItem.Checked = _config.RunAtStartup;
             }
 
-            RefreshTrayPresentation();
+            RefreshTrayPresentation(animateFrom: null);
         }
     }
 
@@ -140,27 +148,89 @@ public sealed class TrayAppContext : ApplicationContext
         if (form.ShowDialog() == DialogResult.OK)
         {
             _config = AppConfig.Load();
-            RefreshTrayPresentation();
+            RefreshTrayPresentation(animateFrom: null);
         }
     }
 
-    private void RefreshTrayPresentation()
+    private void RefreshTrayPresentation(ConnectionMode? animateFrom, ConnectionMode? settleMode = null)
     {
-        var mode = _network.DetectCurrentMode(_config);
-        var nextIcon = IconFactory.CreateForMode(mode);
-        _tray.Icon = nextIcon;
-        _currentIcon?.Dispose();
-        _currentIcon = nextIcon;
-
-        // NotifyIcon.Text is capped at 63 chars and should stay on one line.
+        var mode = settleMode ?? _network.DetectCurrentMode(_config);
         _tray.Text = TruncateTooltip($"LAN/Wi‑Fi Switcher: {ModeLabel(mode)}");
+
+        StopAnimation(disposeFrames: true);
+
+        if (animateFrom is ConnectionMode from && from != mode)
+        {
+            _animSettleMode = mode;
+            _animFrames = IconFactory.CreateToggleAnimation(from, mode);
+            _animIndex = 0;
+            ApplyIcon(_animFrames[0], ownsIcon: false);
+            _animTimer.Start();
+            return;
+        }
+
+        ApplyIcon(IconFactory.CreateForMode(mode), ownsIcon: true);
+    }
+
+    private void OnAnimTick(object? sender, EventArgs e)
+    {
+        if (_animFrames is null || _animIndex >= _animFrames.Count - 1)
+        {
+            StopAnimation(disposeFrames: true);
+            ApplyIcon(IconFactory.CreateForMode(_animSettleMode), ownsIcon: true);
+            return;
+        }
+
+        _animIndex++;
+        ApplyIcon(_animFrames[_animIndex], ownsIcon: false);
+    }
+
+    private void StopAnimation(bool disposeFrames)
+    {
+        _animTimer.Stop();
+        if (disposeFrames && _animFrames is not null)
+        {
+            // Detach before disposing so NotifyIcon is not left holding a freed HICON.
+            if (!_ownsCurrentIcon)
+            {
+                _tray.Icon = SystemIcons.Application;
+                _currentIcon = null;
+            }
+
+            foreach (var frame in _animFrames)
+            {
+                frame.Dispose();
+            }
+        }
+
+        _animFrames = null;
+        _animIndex = 0;
+    }
+
+    private void ApplyIcon(Icon nextIcon, bool ownsIcon)
+    {
+        _tray.Icon = nextIcon;
+        if (_ownsCurrentIcon)
+        {
+            _currentIcon?.Dispose();
+        }
+
+        _currentIcon = nextIcon;
+        _ownsCurrentIcon = ownsIcon;
     }
 
     private void ExitApp()
     {
+        StopAnimation(disposeFrames: true);
         _tray.Visible = false;
         _tray.Dispose();
-        _currentIcon?.Dispose();
+        if (_ownsCurrentIcon)
+        {
+            _currentIcon?.Dispose();
+        }
+
+        _currentIcon = null;
+        _animTimer.Dispose();
         ExitThread();
     }
 
@@ -168,8 +238,15 @@ public sealed class TrayAppContext : ApplicationContext
     {
         if (disposing)
         {
+            StopAnimation(disposeFrames: true);
+            _animTimer.Dispose();
             _tray.Dispose();
-            _currentIcon?.Dispose();
+            if (_ownsCurrentIcon)
+            {
+                _currentIcon?.Dispose();
+            }
+
+            _currentIcon = null;
         }
 
         base.Dispose(disposing);
