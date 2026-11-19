@@ -35,7 +35,8 @@ internal static class Program
             // Continue anyway so Settings remains usable; toggle will fail with a clear error.
         }
 
-        Application.Run(new TrayAppContext());
+        using var context = new TrayAppContext();
+        Application.Run(context);
         _mutex.ReleaseMutex();
         _mutex.Dispose();
     }

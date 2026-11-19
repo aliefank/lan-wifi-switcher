@@ -6,6 +6,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>App.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <AssemblyName>LanWifiSwitcher</AssemblyName>
     <RootNamespace>LanWifiSwitcher</RootNamespace>
@@ -20,6 +21,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <EmbeddedResource Include="App.ico" LogicalName="LanWifiSwitcher.App.ico" />
     <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>
 

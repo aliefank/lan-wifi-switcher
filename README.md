@@ -10,7 +10,7 @@ Tray-only: no main window and no taskbar button on launch. Requires Administrato
 - **Right-click** tray menu:
   - **Settings…** — pick adapters, toast on switch, startup toggle
   - **Choose adapters…** — focused adapter picker with auto-detect
-  - **Toggle now** — same as left-click
+  - **Switch to Ethernet / Wi-Fi** — shows the next destination and switches immediately
   - **Run at startup** — checkable; writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`
   - **Exit**
 - Tray **tooltip** and **icon** reflect the current mode (LAN vs Wi‑Fi), with a short transition on toggle and a **continuous loop** (Wi‑Fi signal arcs / LAN link pulse) while that path is active.
@@ -62,7 +62,7 @@ dotnet publish src\LanWifiSwitcher\LanWifiSwitcher.csproj -c Release -r win-x64 
 | Action | Result |
 |--------|--------|
 | Left-click tray icon | Instantly toggles: if currently on Wi‑Fi → enable LAN & disable Wi‑Fi; otherwise → enable Wi‑Fi & disable LAN. Optional balloon toast if enabled in Settings. |
-| Right-click tray icon | Opens the context menu (Settings, Choose adapters, Toggle now, Run at startup, Exit). |
+| Right-click tray icon | Opens the context menu (current adapter status, Switch to Ethernet / Wi-Fi, Choose adapters, Settings, Run at Windows startup, Exit). |
 
 Adapter enable/disable uses WMI `Win32_NetworkAdapter` `Enable`/`Disable`, with a `netsh interface set interface … admin=` fallback.
 

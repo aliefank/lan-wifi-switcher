@@ -12,14 +12,19 @@ public sealed class TrayAppContext : ApplicationContext
     private AppConfig _config;
     private Icon? _currentIcon;
     private bool _ownsCurrentIcon;
-    private ToolStripMenuItem? _startupItem;
+    private readonly ToolStripLabel _modeStatus = new() { TextAlign = ContentAlignment.MiddleLeft };
+    private readonly ToolStripMenuItem _switchItem = new();
+    private readonly ToolStripMenuItem _startupItem = new("Run at Windows startup");
     private bool _busy;
+    private bool _dialogOpen;
+    private bool _disposed;
     private IReadOnlyList<Icon>? _animFrames;
     private int _animIndex;
     private ConnectionMode _animSettleMode;
     private bool _toggleTransitionActive;
-    private const int LoopIntervalMs = 130;
-    private const int ToggleIntervalMs = 42;
+    private bool _animationsEnabled;
+    private const int LoopIntervalMs = 72;
+    private const int ToggleIntervalMs = 32;
 
     public TrayAppContext()
     {
@@ -46,70 +51,85 @@ public sealed class TrayAppContext : ApplicationContext
 
     private ContextMenuStrip BuildMenu()
     {
-        var menu = new ContextMenuStrip();
+        var menu = new ContextMenuStrip { ShowImageMargin = false, ShowCheckMargin = true };
+        UiTheme.StyleTrayMenu(menu);
+        _modeStatus.Font = UiTheme.SectionFont;
+        _modeStatus.Padding = new Padding(4, 5, 10, 5);
+        _switchItem.Click += async (_, _) => await ToggleNowAsync(showToast: _config.ShowToastOnSwitch);
 
-        menu.Items.Add("Settings…", null, (_, _) => OpenSettings());
-        menu.Items.Add("Choose adapters…", null, (_, _) => OpenAdapterChooser());
+        menu.Items.Add(_modeStatus);
+        menu.Items.Add(_switchItem);
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Toggle now", null, (_, _) => ToggleNow(showToast: true));
-        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Choose adapters…", null, (_, _) => OpenAdapterDialog(showPreferences: false));
+        menu.Items.Add("Settings…", null, (_, _) => OpenAdapterDialog(showPreferences: true));
 
-        _startupItem = new ToolStripMenuItem("Run at startup")
+        _startupItem.Checked = _config.RunAtStartup;
+        _startupItem.Click += (_, _) =>
         {
-            Checked = _config.RunAtStartup,
-            CheckOnClick = true
-        };
-        _startupItem.CheckedChanged += (_, _) =>
-        {
-            _config.RunAtStartup = _startupItem.Checked;
+            var enabled = !_startupItem.Checked;
             try
             {
-                StartupManager.SetEnabled(_config.RunAtStartup);
+                StartupManager.SetEnabled(enabled);
+                _config.RunAtStartup = enabled;
                 _config.Save();
             }
             catch (Exception ex)
             {
                 MessageBox.Show(
                     $"Could not update startup registration:\n{ex.Message}",
-                    "LAN Wi‑Fi Switcher",
+                    "LAN Wi-Fi Switcher",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Error);
-                _startupItem.Checked = StartupManager.IsEnabled();
-                _config.RunAtStartup = _startupItem.Checked;
+                _config.RunAtStartup = StartupManager.IsEnabled();
             }
+
+            _startupItem.Checked = _config.RunAtStartup;
         };
         menu.Items.Add(_startupItem);
-
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitApp());
 
+        menu.Opening += (_, e) =>
+        {
+            if (_busy || _dialogOpen)
+            {
+                e.Cancel = true;
+                return;
+            }
+
+            var mode = _network.DetectCurrentMode(_config);
+            if (_animSettleMode != mode || _animationsEnabled != IconFactory.AnimationsEnabled)
+                RefreshTrayPresentation(animateFrom: null, settleMode: mode);
+            else
+                UpdateMenuStatus(mode);
+        };
         return menu;
     }
 
-    private void OnTrayMouseClick(object? sender, MouseEventArgs e)
+    private async void OnTrayMouseClick(object? sender, MouseEventArgs e)
     {
         if (e.Button == MouseButtons.Left)
         {
-            ToggleNow(showToast: _config.ShowToastOnSwitch);
+            await ToggleNowAsync(showToast: _config.ShowToastOnSwitch);
         }
     }
 
-    private void ToggleNow(bool showToast)
+    private async Task ToggleNowAsync(bool showToast)
     {
-        if (_busy)
+        if (_busy || _dialogOpen)
         {
             return;
         }
 
         _busy = true;
+        _tray.Text = "LAN/Wi-Fi Switcher — switching adapters…";
         ConnectionMode? previous = null;
         ConnectionMode intended = ConnectionMode.Unknown;
         try
         {
-            Cursor.Current = Cursors.WaitCursor;
-            previous = _network.DetectCurrentMode(_config);
-            intended = previous == ConnectionMode.Wifi ? ConnectionMode.Lan : ConnectionMode.Wifi;
-            var next = _network.Toggle(_config);
+            previous = await Task.Run(() => _network.DetectCurrentMode(_config));
+            intended = SwitchTarget(previous.Value);
+            var next = await Task.Run(() => _network.Toggle(_config));
             RefreshTrayPresentation(animateFrom: previous, settleMode: next);
 
             if (showToast)
@@ -121,8 +141,16 @@ public sealed class TrayAppContext : ApplicationContext
         {
             // Race: Ethernet may already be up while Wi‑Fi Disable / route update finishes ~1s later.
             // Don't show a hard error if the intended path landed.
-            Thread.Sleep(1000);
-            var landed = _network.DetectCurrentMode(_config);
+            await Task.Delay(1000);
+            var landed = ConnectionMode.Unknown;
+            try
+            {
+                landed = await Task.Run(() => _network.DetectCurrentMode(_config));
+            }
+            catch
+            {
+                // Keep the original switch error if the follow-up status check also fails.
+            }
             if (previous is ConnectionMode from &&
                 (landed == intended ||
                  (intended == ConnectionMode.Lan && landed is ConnectionMode.Lan or ConnectionMode.Both) ||
@@ -138,12 +166,11 @@ public sealed class TrayAppContext : ApplicationContext
                 return;
             }
 
+            RefreshTrayPresentation(animateFrom: null, settleMode: landed);
             ShowToggleError(ex);
-            RefreshTrayPresentation(animateFrom: null);
         }
         finally
         {
-            Cursor.Current = Cursors.Default;
             _busy = false;
         }
     }
@@ -156,39 +183,55 @@ public sealed class TrayAppContext : ApplicationContext
         _tray.ShowBalloonTip(2500);
     }
 
-    private void OpenSettings()
+    private void OpenAdapterDialog(bool showPreferences)
     {
-        using var form = new SettingsForm(_config, _network);
-        if (form.ShowDialog() == DialogResult.OK)
+        if (_busy || _dialogOpen) return;
+
+        _dialogOpen = true;
+        try
         {
-            _config = AppConfig.Load();
-            if (_startupItem is not null)
+            using Form form = showPreferences
+                ? new SettingsForm(_config, _network)
+                : new AdapterChooserForm(_config, _network);
+            if (form.ShowDialog() == DialogResult.OK)
             {
+                _config = AppConfig.Load();
                 _startupItem.Checked = _config.RunAtStartup;
+                RefreshTrayPresentation(animateFrom: null);
             }
-
-            RefreshTrayPresentation(animateFrom: null);
         }
-    }
-
-    private void OpenAdapterChooser()
-    {
-        using var form = new AdapterChooserForm(_config, _network);
-        if (form.ShowDialog() == DialogResult.OK)
+        finally
         {
-            _config = AppConfig.Load();
-            RefreshTrayPresentation(animateFrom: null);
+            _dialogOpen = false;
         }
     }
+
+    private void UpdateMenuStatus(ConnectionMode mode)
+    {
+        _modeStatus.Text = mode switch
+        {
+            ConnectionMode.Lan => "Ethernet enabled",
+            ConnectionMode.Wifi => "Wi-Fi enabled",
+            ConnectionMode.Both => "Both adapters enabled",
+            ConnectionMode.Neither => "No active adapter",
+            _ => "Adapter status unavailable"
+        };
+        _switchItem.Text = SwitchTarget(mode) == ConnectionMode.Lan ? "Switch to &Ethernet" : "Switch to &Wi-Fi";
+    }
+
+    private static ConnectionMode SwitchTarget(ConnectionMode mode) =>
+        mode == ConnectionMode.Wifi ? ConnectionMode.Lan : ConnectionMode.Wifi;
 
     private void RefreshTrayPresentation(ConnectionMode? animateFrom, ConnectionMode? settleMode = null)
     {
         var mode = settleMode ?? _network.DetectCurrentMode(_config);
-        _tray.Text = TruncateTooltip($"LAN/Wi‑Fi Switcher: {ModeLabel(mode)}");
+        UpdateMenuStatus(mode);
+        _tray.Text = TruncateTooltip($"LAN/Wi-Fi Switcher — {_modeStatus.Text}");
 
         StopAnimation(disposeFrames: true);
+        _animationsEnabled = IconFactory.AnimationsEnabled;
 
-        if (animateFrom is ConnectionMode from && from != mode)
+        if (_animationsEnabled && animateFrom is ConnectionMode from && from != mode)
         {
             _animSettleMode = mode;
             _toggleTransitionActive = true;
@@ -208,7 +251,7 @@ public sealed class TrayAppContext : ApplicationContext
         _animSettleMode = mode;
         _toggleTransitionActive = false;
 
-        if (!IconFactory.SupportsContinuousLoop(mode))
+        if (!_animationsEnabled || !IconFactory.SupportsContinuousLoop(mode))
         {
             _animTimer.Stop();
             ApplyIcon(IconFactory.CreateForMode(mode), ownsIcon: true);
@@ -289,27 +332,17 @@ public sealed class TrayAppContext : ApplicationContext
         _ownsCurrentIcon = ownsIcon;
     }
 
-    private void ExitApp()
-    {
-        StopAnimation(disposeFrames: true);
-        _tray.Visible = false;
-        _tray.Dispose();
-        if (_ownsCurrentIcon)
-        {
-            _currentIcon?.Dispose();
-        }
-
-        _currentIcon = null;
-        _animTimer.Dispose();
-        ExitThread();
-    }
+    private void ExitApp() => ExitThread();
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        if (disposing && !_disposed)
         {
+            _disposed = true;
             StopAnimation(disposeFrames: true);
             _animTimer.Dispose();
+            _tray.Visible = false;
+            _tray.ContextMenuStrip?.Dispose();
             _tray.Dispose();
             if (_ownsCurrentIcon)
             {
@@ -336,8 +369,7 @@ public sealed class TrayAppContext : ApplicationContext
 
         // …and a dialog with the full detail + recovery hint.
         MessageBox.Show(
-            message + "\n\nTip: Right-click the tray icon → Choose adapters… and select your " +
-            "Realtek / MediaTek / WLAN NIC (look for the [Wi‑Fi] hint).",
+            message + "\n\nOpen Choose adapters from the tray to check your Ethernet and Wi-Fi selections.",
             "LAN Wi‑Fi Switcher — toggle failed",
             MessageBoxButtons.OK,
             MessageBoxIcon.Error);

@@ -338,10 +338,12 @@ public sealed class NetworkAdapterService
     /// Auto-pick or repair LAN/Wi‑Fi roles. Prefers aliases "Ethernet" / "Wi-Fi".
     /// Ignores Bluetooth, TAP, OpenVPN, and other virtual NICs. Does not require a cable link.
     /// </summary>
-    public void AutoSelectDefaults(AppConfig config, bool repairUnsuitable = true)
-    {
-        var adapters = GetAdapters();
+    public void AutoSelectDefaults(AppConfig config, bool repairUnsuitable = true) =>
+        AutoSelectDefaults(config, GetAdapters(), repairUnsuitable);
 
+    internal void AutoSelectDefaults(
+        AppConfig config, IReadOnlyList<NetworkAdapterInfo> adapters, bool repairUnsuitable = true)
+    {
         // 1) Strongest signal: exact ncpa.cpl aliases, even if Kind was previously wrong.
         var ethernet = FindCanonicalAlias(adapters, wifi: false);
         var wifi = FindCanonicalAlias(adapters, wifi: true);
